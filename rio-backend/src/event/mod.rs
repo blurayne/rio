@@ -19,6 +19,22 @@ use rio_window::event_loop::EventLoopProxy;
 
 pub type WindowId = rio_window::window::WindowId;
 
+/// Opaque identifier for a pane node in a `ContextGrid` Taffy tree.
+/// Using `u64` (the raw Taffy `NodeId` bits) so rio-backend stays free of
+/// a direct `taffy` dependency.
+pub type PaneNodeId = u64;
+
+/// The drop quadrant within a target pane during a drag-and-drop operation.
+/// Each pane is divided into four triangles by its diagonals; the quadrant
+/// under the cursor determines the split direction of the drop.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PaneDropQuadrant {
+    Left,
+    Top,
+    Right,
+    Bottom,
+}
+
 #[derive(Debug, Clone)]
 pub enum RioEventType {
     Rio(RioEvent),
@@ -222,6 +238,31 @@ pub enum RioEvent {
 
     // No operation
     Noop,
+
+    // ── Tiling events (Phase 1 stubs; handlers wired in later phases) ──
+
+    /// Tear a pane off into a brand-new top-level window. US-5.5.
+    ///
+    /// `source_node` is the raw `taffy::NodeId` bits cast to `PaneNodeId`.
+    /// `target_position` is the requested screen-space position for the new window.
+    DetachPaneToWindow {
+        source_window: WindowId,
+        source_tab: usize,
+        source_node: PaneNodeId,
+        target_position: (i32, i32),
+    },
+
+    /// Move a pane from one session / window to another by splitting the
+    /// target node in the indicated quadrant. US-5.4.
+    TransferPaneToSession {
+        source_window: WindowId,
+        source_tab: usize,
+        source_node: PaneNodeId,
+        target_window: WindowId,
+        target_tab: usize,
+        target_node: PaneNodeId,
+        target_quadrant: PaneDropQuadrant,
+    },
 }
 
 impl Debug for RioEvent {
@@ -304,6 +345,27 @@ impl Debug for RioEvent {
             RioEvent::SelectionScrollTick => write!(f, "SelectionScrollTick"),
             RioEvent::UpdateTitles => write!(f, "UpdateTitles"),
             RioEvent::Noop => write!(f, "Noop"),
+            RioEvent::DetachPaneToWindow {
+                source_window,
+                source_tab,
+                source_node,
+                target_position,
+            } => write!(
+                f,
+                "DetachPaneToWindow(window={source_window:?}, tab={source_tab}, node={source_node}, pos={target_position:?})"
+            ),
+            RioEvent::TransferPaneToSession {
+                source_window,
+                source_tab,
+                source_node,
+                target_window,
+                target_tab,
+                target_node,
+                target_quadrant,
+            } => write!(
+                f,
+                "TransferPaneToSession(src=({source_window:?},{source_tab},{source_node}), dst=({target_window:?},{target_tab},{target_node}), quadrant={target_quadrant:?})"
+            ),
             RioEvent::Copy(_) => write!(f, "Copy"),
             RioEvent::Paste => write!(f, "Paste"),
             RioEvent::UpdateFontSize(action) => write!(f, "UpdateFontSize({action:?})"),

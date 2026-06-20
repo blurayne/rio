@@ -26,6 +26,10 @@ pub enum NavigationMode {
     #[cfg(target_os = "macos")]
     #[serde(alias = "nativetab")]
     NativeTab,
+    /// Collapsible left-side session panel (US-8.5). Toggled via
+    /// `Action::ToggleSessionSidebar` / the `F12` key in the Tilix preset.
+    #[serde(alias = "sidebar")]
+    Sidebar,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -47,6 +51,7 @@ impl NavigationMode {
     const TAB_STR: &'static str = "Tab";
     #[cfg(target_os = "macos")]
     const NATIVE_TAB_STR: &'static str = "NativeTab";
+    const SIDEBAR_STR: &'static str = "Sidebar";
 
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -54,6 +59,7 @@ impl NavigationMode {
             Self::Tab => Self::TAB_STR,
             #[cfg(target_os = "macos")]
             Self::NativeTab => Self::NATIVE_TAB_STR,
+            Self::Sidebar => Self::SIDEBAR_STR,
         }
     }
 }
@@ -65,6 +71,7 @@ pub fn modes_as_vec_string() -> Vec<String> {
         NavigationMode::Tab,
         #[cfg(target_os = "macos")]
         NavigationMode::NativeTab,
+        NavigationMode::Sidebar,
     ]
     .iter()
     .map(|navigation_mode| navigation_mode.to_string())
@@ -89,6 +96,7 @@ impl std::str::FromStr for NavigationMode {
             Self::TAB_STR => Ok(NavigationMode::Tab),
             #[cfg(target_os = "macos")]
             Self::NATIVE_TAB_STR => Ok(NavigationMode::NativeTab),
+            Self::SIDEBAR_STR => Ok(NavigationMode::Sidebar),
             _ => Ok(NavigationMode::default()),
         }
     }

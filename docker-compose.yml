@@ -1,0 +1,22 @@
+services:
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rio-build:latest
+    volumes:
+      - .:/workspace
+      - cargo-registry:/cargo/registry
+      - cargo-git:/cargo/git
+      - target-cache:/workspace/target
+    working_dir: /workspace
+    environment:
+      RUST_BACKTRACE: full
+      CARGO_TERM_COLOR: always
+    # default: drop to shell; override with `docker compose run build cargo build ...`
+    command: bash
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target-cache:

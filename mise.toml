@@ -1,0 +1,83 @@
+[settings]
+experimental = true
+
+# All build/test/lint tasks run inside the Ubuntu 22.04 container.
+# Target: ubuntu22 (see Dockerfile + docker-compose.yml).
+# Use `mise run docker-build` first to create the image.
+
+[tasks.docker-build]
+description = "Build the ubuntu22 build container image"
+run = "docker compose build"
+
+[tasks.docker-shell]
+description = "Drop into an interactive shell inside the build container"
+run = "docker compose run --rm build bash"
+
+[tasks.build]
+description = "Release build (wayland, inside container)"
+run = "docker compose run --rm build cargo build --release -p rioterm --no-default-features --features=wayland"
+
+[tasks.build-wayland]
+description = "Release build — Wayland feature (inside container)"
+run = "docker compose run --rm build cargo build --release -p rioterm --no-default-features --features=wayland"
+
+[tasks.build-x11]
+description = "Release build — X11 feature (inside container)"
+run = "docker compose run --rm build cargo build --release -p rioterm --no-default-features --features=x11"
+
+[tasks.build-all-features]
+description = "Debug build with all features (inside container)"
+run = "docker compose run --rm build cargo build -p rioterm --all-features"
+
+[tasks.lint]
+description = "Format check + Clippy (inside container)"
+run = """
+docker compose run --rm build sh -c "
+  cargo fmt -- --check --color always &&
+  cargo clippy --all-targets --all-features -- -D warnings
+"
+"""
+
+[tasks.test]
+description = "Full test suite — lint + cargo test (inside container)"
+run = """
+docker compose run --rm build sh -c "
+  cargo fmt -- --check --color always &&
+  cargo clippy --all-targets --all-features -- -D warnings &&
+  RUST_BACKTRACE=full cargo test --features wgpu
+"
+"""
+
+[tasks.test-only]
+description = "Run tests only, no lint (inside container)"
+run = "docker compose run --rm build cargo test --features wgpu"
+
+[tasks.fetch]
+description = "Pre-fetch all crate dependencies into the cargo volume"
+run = "docker compose run --rm build cargo fetch"
+
+[tasks.release-debian-wayland]
+description = "Build Debian .deb package (Wayland) inside container"
+run = """
+docker compose run --rm build sh -c "
+  cargo install cargo-deb &&
+  cargo deb -p rioterm -- --no-default-features --features=wayland
+"
+"""
+
+[tasks.release-debian-x11]
+description = "Build Debian .deb package (X11) inside container"
+run = """
+docker compose run --rm build sh -c "
+  cargo install cargo-deb &&
+  cargo deb -p rioterm -- --no-default-features --features=x11
+"
+"""
+
+[tasks.clean]
+description = "Remove the target-cache volume (preserves crate downloads)"
+run = "docker volume rm rio_target-cache || true"
+
+[tasks.clean-all]
+description = "Remove ALL build volumes including crate cache"
+run = "docker volume rm rio_target-cache rio_cargo-registry rio_cargo-git || true"

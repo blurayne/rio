@@ -43,6 +43,10 @@ pub struct Mouse {
     /// within the same cell — replaces the old pixel-equality check
     /// that fired on every subpixel HiDPI jitter.
     pub last_cell: Option<Pos>,
+    /// Tracks the position and time of the most recent click on a panel
+    /// border splitter. Used to detect a double-click on a splitter so
+    /// that the panes along that axis can be redistributed evenly.
+    pub last_border_click: Option<(f32, f32, std::time::Instant)>,
 }
 
 impl Default for Mouse {
@@ -64,6 +68,7 @@ impl Default for Mouse {
             y: 0.0,
             raw_y: 0.0,
             last_cell: None,
+            last_border_click: None,
         }
     }
 }

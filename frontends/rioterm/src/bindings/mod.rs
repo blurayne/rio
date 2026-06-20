@@ -4,6 +4,17 @@
 
 pub mod kitty_keyboard;
 
+/// Cardinal direction for pane navigation, resize, and related tiling actions.
+/// Named `PaneDirection` to avoid collision with `rio_backend::crosswords::pos::Direction`
+/// (which is a two-way search direction).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PaneDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 use crate::crosswords::vi_mode::ViMotion;
 use crate::crosswords::Mode;
 use bitflags::bitflags;
@@ -267,6 +278,17 @@ impl From<String> for Action {
             "togglefullscreen" => Some(Action::ToggleFullscreen),
             "opencommandpalette" => Some(Action::OpenCommandPalette),
             "none" => Some(Action::None),
+            // Tiling actions (Phase 1)
+            "splitauto" => Some(Action::SplitAuto),
+            "togglepanemaximized" => Some(Action::TogglePaneMaximized),
+            "distributepanesevenly" => Some(Action::DistributePanesEvenly),
+            "togglesyncinputsession" => Some(Action::ToggleSyncInputSession),
+            "togglepanesyncinputoverride" => Some(Action::TogglePaneSyncInputOverride),
+            "togglepanereadonly" => Some(Action::TogglePaneReadOnly),
+            "savesessionlayout" => Some(Action::SaveSessionLayout),
+            "opensessionlayout" => Some(Action::OpenSessionLayout),
+            "togglesessionsidebar" => Some(Action::ToggleSessionSidebar),
+            "detachpanetowindow" => Some(Action::DetachPaneToWindow),
             _ => None,
         };
 
@@ -316,7 +338,46 @@ impl From<String> for Action {
             }
         }
 
+        // focuspanebynumber(N) — e.g. "FocusPaneByNumber(3)"
+        let re = regex::Regex::new(r"focuspanebynumber\(([^()]+)\)").unwrap();
+        for capture in re.captures_iter(&action) {
+            if let Some(matched) = capture.get(1) {
+                let n: u8 = matched.as_str().parse().unwrap_or(1);
+                return Action::FocusPaneByNumber(n);
+            }
+        }
+
+        // focuspanebydirection(up|down|left|right)
+        let re = regex::Regex::new(r"focuspanebydirection\(([^()]+)\)").unwrap();
+        for capture in re.captures_iter(&action) {
+            if let Some(matched) = capture.get(1) {
+                let dir = parse_pane_direction(matched.as_str());
+                return Action::FocusPaneByDirection(dir);
+            }
+        }
+
+        // resizepaneindirection(up|down|left|right)
+        let re = regex::Regex::new(r"resizepaneindirection\(([^()]+)\)").unwrap();
+        for capture in re.captures_iter(&action) {
+            if let Some(matched) = capture.get(1) {
+                let dir = parse_pane_direction(matched.as_str());
+                return Action::ResizePaneInDirection(dir);
+            }
+        }
+
         Action::None
+    }
+}
+
+/// Parse a lowercase direction token into a `PaneDirection`.
+/// Defaults to `PaneDirection::Right` for unknown tokens.
+fn parse_pane_direction(s: &str) -> PaneDirection {
+    match s.trim() {
+        "up" => PaneDirection::Up,
+        "down" => PaneDirection::Down,
+        "left" => PaneDirection::Left,
+        "right" => PaneDirection::Right,
+        _ => PaneDirection::Right,
     }
 }
 
@@ -510,6 +571,50 @@ pub enum Action {
 
     /// No action.
     None,
+
+    // ── Tiling actions (Phase 1 stubs; behaviour wired in later phases) ──
+
+    /// Split the current pane in the orientation that best fits its aspect ratio
+    /// (horizontal when wider than tall, vertical otherwise). US-1.3.
+    SplitAuto,
+
+    /// Focus the Nth pane in visual creation order (1-indexed). US-2.1.
+    FocusPaneByNumber(u8),
+
+    /// Focus the geometrically nearest pane in the given cardinal direction. US-2.2.
+    FocusPaneByDirection(PaneDirection),
+
+    /// Shift the boundary between the current pane and its neighbour by 10 px
+    /// in the given direction. US-3.1.
+    ResizePaneInDirection(PaneDirection),
+
+    /// Toggle the current pane to fill the session area (distinct from the
+    /// window-level `ToggleMaximized`). US-4.
+    TogglePaneMaximized,
+
+    /// Redistribute all panes in the current session to equal sizes. US-3.3.
+    DistributePanesEvenly,
+
+    /// Toggle session-wide synchronised input (all panes receive each key). US-9.1.
+    ToggleSyncInputSession,
+
+    /// Toggle the per-pane opt-out from session-wide synchronised input. US-9.2.
+    TogglePaneSyncInputOverride,
+
+    /// Toggle read-only mode on the current pane (blocks PTY writes).
+    TogglePaneReadOnly,
+
+    /// Serialize the current session layout to a JSON file. US-8.6.
+    SaveSessionLayout,
+
+    /// Deserialize and apply a previously saved session layout. US-8.6.
+    OpenSessionLayout,
+
+    /// Toggle the collapsible session sidebar (NavigationMode::Sidebar). US-8.5.
+    ToggleSessionSidebar,
+
+    /// Tear the current pane off into a new top-level window. US-5.5.
+    DetachPaneToWindow,
 }
 
 impl From<&'static str> for Action {
@@ -731,7 +836,7 @@ pub fn default_key_bindings(config: &rio_backend::config::Config) -> Vec<KeyBind
     bindings.extend(platform_key_bindings(
         config.navigation.has_navigation_key_bindings(),
         config.navigation.use_split,
-        config.keyboard,
+        config.keyboard.clone(),
     ));
 
     // Add hint bindings
@@ -1220,6 +1325,89 @@ mod tests {
     use rio_window::keyboard::ModifiersState;
 
     type MockBinding = Binding<usize>;
+
+    #[test]
+    fn parses_new_action_names() {
+        // Simple keyword variants
+        assert_eq!(Action::from("splitauto".to_string()), Action::SplitAuto);
+        assert_eq!(
+            Action::from("TogglePaneMaximized".to_string()),
+            Action::TogglePaneMaximized
+        );
+        assert_eq!(
+            Action::from("distributepanesevenly".to_string()),
+            Action::DistributePanesEvenly
+        );
+        assert_eq!(
+            Action::from("togglesyncinputsession".to_string()),
+            Action::ToggleSyncInputSession
+        );
+        assert_eq!(
+            Action::from("togglepanesyncinputoverride".to_string()),
+            Action::TogglePaneSyncInputOverride
+        );
+        assert_eq!(
+            Action::from("togglepanereadonly".to_string()),
+            Action::TogglePaneReadOnly
+        );
+        assert_eq!(
+            Action::from("savesessionlayout".to_string()),
+            Action::SaveSessionLayout
+        );
+        assert_eq!(
+            Action::from("opensessionlayout".to_string()),
+            Action::OpenSessionLayout
+        );
+        assert_eq!(
+            Action::from("togglesessionsidebar".to_string()),
+            Action::ToggleSessionSidebar
+        );
+        assert_eq!(
+            Action::from("detachpanetowindow".to_string()),
+            Action::DetachPaneToWindow
+        );
+        // Parameterised variants
+        assert_eq!(
+            Action::from("focuspanebynumber(3)".to_string()),
+            Action::FocusPaneByNumber(3)
+        );
+        assert_eq!(
+            Action::from("FocusPaneByNumber(10)".to_string()),
+            Action::FocusPaneByNumber(10)
+        );
+        assert_eq!(
+            Action::from("focuspanebydirection(up)".to_string()),
+            Action::FocusPaneByDirection(PaneDirection::Up)
+        );
+        assert_eq!(
+            Action::from("focuspanebydirection(down)".to_string()),
+            Action::FocusPaneByDirection(PaneDirection::Down)
+        );
+        assert_eq!(
+            Action::from("focuspanebydirection(left)".to_string()),
+            Action::FocusPaneByDirection(PaneDirection::Left)
+        );
+        assert_eq!(
+            Action::from("focuspanebydirection(right)".to_string()),
+            Action::FocusPaneByDirection(PaneDirection::Right)
+        );
+        assert_eq!(
+            Action::from("ResizePaneInDirection(up)".to_string()),
+            Action::ResizePaneInDirection(PaneDirection::Up)
+        );
+        assert_eq!(
+            Action::from("resizepaneindirection(down)".to_string()),
+            Action::ResizePaneInDirection(PaneDirection::Down)
+        );
+        assert_eq!(
+            Action::from("resizepaneindirection(left)".to_string()),
+            Action::ResizePaneInDirection(PaneDirection::Left)
+        );
+        assert_eq!(
+            Action::from("resizepaneindirection(right)".to_string()),
+            Action::ResizePaneInDirection(PaneDirection::Right)
+        );
+    }
 
     impl Default for MockBinding {
         fn default() -> Self {
