@@ -1369,20 +1369,22 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             return;
                         }
 
-                        // Phase 9: handle pane drag drop
+                        // Phase 9+10: handle pane drag drop
                         if button == MouseButton::Left {
                             if let Some(drag) = route.window.screen.pane_drag.take() {
                                 use crate::renderer::pane_dnd::quadrant_at;
                                 // Physical pixels — matches find_context_at_position expectations
                                 let cx = route.window.screen.mouse.x as f32;
                                 let cy = route.window.screen.mouse.y as f32;
-                                let target = route
+
+                                // Same-session drop (Phase 9)
+                                let same_session_target = route
                                     .window
                                     .screen
                                     .context_manager
                                     .current_grid()
                                     .find_context_at_position(cx, cy);
-                                if let Some(target_node) = target {
+                                if let Some(target_node) = same_session_target {
                                     if target_node != drag.source_node
                                         && route
                                             .window
@@ -1428,6 +1430,71 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                         route.window.screen.mark_dirty();
                                         route.request_redraw();
                                     }
+                                } else {
+                                    // Phase 10: check if cursor is over the Island tab strip
+                                    use crate::renderer::island::{
+                                        tab_strip_layout, ISLAND_HEIGHT,
+                                    };
+                                    let scale =
+                                        route.window.screen.sugarloaf.scale_factor();
+                                    let is_in_tab_strip = cy < ISLAND_HEIGHT * scale;
+
+                                    if is_in_tab_strip
+                                        && route
+                                            .window
+                                            .screen
+                                            .renderer
+                                            .island
+                                            .is_some()
+                                    {
+                                        let window_size = route
+                                            .window
+                                            .screen
+                                            .sugarloaf
+                                            .window_size();
+                                        let num_tabs = route
+                                            .window
+                                            .screen
+                                            .context_manager
+                                            .len();
+                                        let layout = tab_strip_layout(
+                                            window_size.width,
+                                            scale,
+                                            num_tabs,
+                                        );
+                                        // Convert physical px → logical x, then find tab index
+                                        let lx = cx / scale;
+                                        let tab_index = if lx < layout.left_margin {
+                                            0usize
+                                        } else {
+                                            ((lx - layout.left_margin)
+                                                / layout.tab_width.max(1.0))
+                                                as usize
+                                        }
+                                        .min(num_tabs.saturating_sub(1));
+
+                                        let current_index = route
+                                            .window
+                                            .screen
+                                            .context_manager
+                                            .current_index();
+                                        if tab_index != current_index {
+                                            route
+                                                .window
+                                                .screen
+                                                .context_manager
+                                                .transfer_pane_to_session(
+                                                    current_index,
+                                                    drag.source_node,
+                                                    tab_index,
+                                                    &mut route.window.screen.sugarloaf,
+                                                );
+                                            route.window.screen.mark_dirty();
+                                            route.request_redraw();
+                                        }
+                                    }
+                                    // else: dropped on empty area or same session with no
+                                    // target — cancel drag silently.
                                 }
                                 return;
                             }

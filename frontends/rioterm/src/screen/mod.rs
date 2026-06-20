@@ -806,7 +806,7 @@ impl Screen<'_> {
                             .contexts_mut()
                             .get_mut(&id)
                         {
-                            let _ = item.val.messenger.send_write(bytes.clone());
+                            item.val.messenger.send_write(bytes.clone());
                         }
                     }
                 }

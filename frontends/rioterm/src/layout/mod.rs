@@ -1604,6 +1604,23 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         Some(item)
     }
 
+    /// Like `take_pane` but works even when this is the last pane in the grid.
+    /// Used exclusively by cross-session transfer, where the source session is
+    /// removed from the context list once the pane has been extracted.
+    /// Callers MUST remove the source `ContextGrid` from the session list
+    /// immediately after calling this method — the grid is left in an invalid
+    /// (empty) state.
+    pub fn take_sole_pane(
+        &mut self,
+        node_id: taffy::NodeId,
+    ) -> Option<ContextGridItem<T>> {
+        if !self.inner.contains_key(&node_id) {
+            return None;
+        }
+        let _ = self.tree.remove(node_id);
+        self.inner.remove(&node_id)
+    }
+
     /// Move source pane to land on an edge of target pane.
     /// No-op when source == target or grid is maximized.
     pub fn move_pane(
