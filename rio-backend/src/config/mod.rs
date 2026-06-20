@@ -19,7 +19,7 @@ use crate::config::bindings::Bindings;
 use crate::config::defaults::*;
 use crate::config::hints::Hints;
 use crate::config::keyboard::Keyboard;
-use crate::config::layout::{Margin, Panel};
+use crate::config::layout::{Margin, Pane, Panel};
 use crate::config::navigation::Navigation;
 use crate::config::platform::{Platform, PlatformConfig};
 use crate::config::renderer::Renderer;
@@ -123,6 +123,8 @@ pub struct Config {
     pub margin: Margin,
     #[serde(default = "Panel::default")]
     pub panel: Panel,
+    #[serde(default = "Pane::default")]
+    pub pane: Pane,
     #[serde(default = "Vec::default", rename = "env-vars")]
     pub env_vars: Vec<String>,
     #[serde(default = "default_option_as_alt", rename = "option-as-alt")]
@@ -647,6 +649,7 @@ impl Default for Config {
             option_as_alt: default_option_as_alt(),
             margin: default_margin(),
             panel: Panel::default(),
+            pane: Pane::default(),
             renderer: Renderer::default(),
             shell: default_shell(),
             platform: Platform::default(),

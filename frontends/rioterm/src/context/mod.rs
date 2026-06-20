@@ -870,6 +870,12 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
                 self.event_proxy
                     .send_event(RioEvent::CloseWindow, self.window_id);
             }
+            // Phase 15 (US-7.2): on all platforms, close the window when the
+            // last session is closed and the preference is set.
+            if self.config.pane.close_window_with_last_session {
+                self.event_proxy
+                    .send_event(RioEvent::CloseWindow, self.window_id);
+            }
             return;
         }
 
@@ -1800,5 +1806,44 @@ pub mod test {
         // (verified by the "if target_index >= self.contexts.len()" guard)
         assert_eq!(context_manager.len(), 1);
         let _ = current_node; // suppress unused warning
+    }
+
+    // Phase 15 tests
+
+    #[test]
+    fn pane_config_defaults_are_false() {
+        // Verify that close_window_with_last_session and close_on_middle_click
+        // both default to false so existing behaviour is unchanged.
+        let window_id: WindowId = WindowId::from(0);
+        let context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+        assert!(
+            !context_manager.config.pane.close_window_with_last_session,
+            "close_window_with_last_session should default to false"
+        );
+        assert!(
+            !context_manager.config.pane.close_on_middle_click,
+            "close_on_middle_click should default to false"
+        );
+        assert!(
+            !context_manager.config.pane.titlebar,
+            "titlebar should default to false"
+        );
+    }
+
+    #[test]
+    fn pane_config_fields_are_independently_settable() {
+        // Verify that Pane config fields are individually mutable (used in hot-reload path).
+        let window_id: WindowId = WindowId::from(0);
+        let mut context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+        context_manager.config.pane.close_window_with_last_session = true;
+        assert!(context_manager.config.pane.close_window_with_last_session);
+        // close_on_middle_click remains false
+        assert!(!context_manager.config.pane.close_on_middle_click);
+
+        context_manager.config.pane.close_on_middle_click = true;
+        assert!(context_manager.config.pane.close_on_middle_click);
+        assert!(context_manager.config.pane.close_window_with_last_session);
     }
 }

@@ -1275,6 +1275,45 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                 route.request_redraw();
                                 return;
                             }
+                        } else if let MouseButton::Middle = button {
+                            // Phase 15 (US-6.5): middle-click on a pane titlebar closes
+                            // that pane when `pane.close_on_middle_click = true`.
+                            if route
+                                .window
+                                .screen
+                                .context_manager
+                                .config
+                                .pane
+                                .close_on_middle_click
+                            {
+                                let scale =
+                                    route.window.screen.sugarloaf.scale_factor();
+                                let mx =
+                                    route.window.screen.mouse.x as f32 / scale;
+                                let my =
+                                    route.window.screen.mouse.y as f32 / scale;
+                                if let Some((_node_id, _hit)) =
+                                    route.window.screen.pane_titlebar.hit_test(mx, my)
+                                {
+                                    // Switch focus to the clicked pane first so
+                                    // close_split_or_tab closes the right one.
+                                    route
+                                        .window
+                                        .screen
+                                        .context_manager
+                                        .current_grid_mut()
+                                        .current = _node_id;
+                                    route
+                                        .window
+                                        .screen
+                                        .close_split_or_tab(
+                                            &mut self.router.clipboard,
+                                        );
+                                    route.window.screen.mark_dirty();
+                                    route.request_redraw();
+                                    return;
+                                }
+                            }
                         }
 
                         // Always try panel switching first: if the click

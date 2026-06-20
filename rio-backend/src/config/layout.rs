@@ -1,5 +1,25 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// Per-pane configuration options (all opt-in; all default to `false`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Pane {
+    /// Show an optional titlebar above each pane when the session has
+    /// more than one pane. The titlebar exposes drag-and-drop, a close
+    /// button, a maximize button, a sync-input icon, and a popover menu.
+    #[serde(default)]
+    pub titlebar: bool,
+
+    /// When the last pane in a session is closed, also close the window
+    /// instead of replacing it with a fresh empty session.
+    #[serde(default, rename = "close-window-with-last-session")]
+    pub close_window_with_last_session: bool,
+
+    /// Close the pane whose titlebar is middle-clicked (requires
+    /// `titlebar = true`).
+    #[serde(default, rename = "close-on-middle-click")]
+    pub close_on_middle_click: bool,
+}
+
 // Panel configuration for split layouts
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Panel {
