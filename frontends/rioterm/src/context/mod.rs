@@ -574,6 +574,24 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             .send_event(RioEvent::CreateWindow, self.window_id);
     }
 
+    /// Emit a `DetachPaneToWindow` event for the current pane.
+    /// This is the keyboard-action entry point for US-5.5.
+    #[inline]
+    pub fn request_detach_current_pane_to_window(&self) {
+        use rio_backend::event::PaneNodeId;
+        let node_bits: PaneNodeId =
+            self.contexts[self.current_index].current_node_id_as_u64();
+        self.event_proxy.send_event(
+            RioEvent::DetachPaneToWindow {
+                source_window: self.window_id,
+                source_tab: self.current_index,
+                source_node: node_bits,
+                target_position: (100, 100),
+            },
+            self.window_id,
+        );
+    }
+
     #[inline]
     pub fn close_unfocused_tabs(&mut self) {
         let current_route_id = self.current().route_id;
@@ -1310,6 +1328,34 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         }
     }
 
+    /// Extract the current pane from the current grid.
+    ///
+    /// Returns `None` if this is the last pane in the grid (can't leave it empty).
+    /// When extraction succeeds and the source grid becomes empty, the grid is
+    /// removed from `self.contexts` and `current_index` is adjusted.
+    pub fn detach_current_pane(
+        &mut self,
+        sugarloaf: &mut Sugarloaf,
+    ) -> Option<Context<T>> {
+        let node = self.contexts[self.current_index].current;
+        let item = self.contexts[self.current_index].take_pane(node, sugarloaf)?;
+        let context = item.val;
+
+        // If the grid is now empty (take_pane only succeeds when > 1 pane,
+        // so this can't happen — but guard defensively).
+        if self.contexts[self.current_index].panel_count() == 0 {
+            self.contexts.remove(self.current_index);
+            if self.current_index >= self.contexts.len() && self.current_index > 0 {
+                self.current_index -= 1;
+            }
+            if !self.contexts.is_empty() {
+                self.current_route = self.contexts[self.current_index].current().route_id;
+            }
+        }
+
+        Some(context)
+    }
+
     /// Hide all rich text components except for the current tab
     #[inline]
     pub fn keep_only_active_context_visible(&self, sugarloaf: &mut Sugarloaf) {
@@ -1845,5 +1891,24 @@ pub mod test {
         context_manager.config.pane.close_on_middle_click = true;
         assert!(context_manager.config.pane.close_on_middle_click);
         assert!(context_manager.config.pane.close_window_with_last_session);
+    }
+
+    // Phase 11 tests
+
+    /// `detach_current_pane` returns None when the grid has only one pane
+    /// (can't leave the grid empty).
+    #[test]
+    fn detach_current_pane_returns_none_for_single_pane() {
+        let window_id: WindowId = WindowId::from(0);
+
+        let context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+
+        // The manager starts with a single tab that has exactly one pane.
+        assert_eq!(context_manager.len(), 1);
+        assert_eq!(context_manager.current_grid_len(), 1);
+
+        // Verify that the panel_count is 1 (which will cause take_pane to return None).
+        assert_eq!(context_manager.current_grid().panel_count(), 1);
     }
 }

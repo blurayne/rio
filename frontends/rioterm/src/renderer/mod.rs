@@ -5,6 +5,7 @@ pub mod helpers;
 pub mod island;
 pub mod pane_dnd;
 pub mod pane_titlebar;
+pub mod pane_titlebar_menu;
 pub mod scrollbar;
 pub mod search;
 pub mod sidebar;
@@ -58,6 +59,7 @@ pub struct Renderer {
     pub island: Option<island::Island>,
     pub sidebar: sidebar::Sidebar,
     pub command_palette: command_palette::CommandPalette,
+    pub pane_titlebar_menu: pane_titlebar_menu::PaneTitlebarMenu,
     unfocused_split_opacity: f32,
     unfocused_split_fill: Option<ColorArray>,
     last_active: Option<NodeId>,
@@ -151,6 +153,7 @@ impl Renderer {
                 palette.has_adaptive_theme = config.adaptive_colors.is_some();
                 palette
             },
+            pane_titlebar_menu: pane_titlebar_menu::PaneTitlebarMenu::new(),
             named_colors,
             dynamic_background,
             opacity_cells: config.window.opacity_cells,
@@ -627,6 +630,8 @@ impl Renderer {
             sugarloaf,
             (window_size.width, window_size.height, scale_factor),
         );
+
+        self.pane_titlebar_menu.render(sugarloaf, scale_factor);
 
         // Render scrollbars for each panel
         let grid_scaled_margin_sb = context_manager.get_current_grid_scaled_margin();

@@ -903,9 +903,45 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     }
                 }
             }
-            // ── Tiling stubs (Phase 1) — full handlers wired in later phases ──
-            RioEventType::Rio(RioEvent::DetachPaneToWindow { .. }) => {
-                tracing::debug!("stub phase 1: DetachPaneToWindow");
+            // ── Phase 11: tear-off pane to new window (US-5.5) ──
+            RioEventType::Rio(RioEvent::DetachPaneToWindow {
+                source_window,
+                source_tab,
+                source_node: _source_node,
+                target_position: _target_position,
+            }) => {
+                // Extract the pane from the source route, then create a new window.
+                // Two separate borrows are needed: one for extraction, one for creation.
+                let extracted = if let Some(route) =
+                    self.router.routes.get_mut(&source_window)
+                {
+                    route.window.screen.context_manager.set_current(source_tab);
+                    let result = route
+                        .window
+                        .screen
+                        .context_manager
+                        .detach_current_pane(&mut route.window.screen.sugarloaf);
+                    if result.is_some() {
+                        route.window.screen.mark_dirty();
+                        route.request_redraw();
+                    }
+                    result
+                } else {
+                    None
+                };
+
+                if extracted.is_some() {
+                    // TODO: preserve running PTY across window tear-off.
+                    // For now, create a fresh window with a new PTY. The
+                    // extracted context (with its PTY) is dropped here.
+                    self.router.create_window(
+                        event_loop,
+                        self.event_proxy.clone(),
+                        &self.config,
+                        None,
+                        self.app_id.as_deref(),
+                    );
+                }
             }
             RioEventType::Rio(RioEvent::TransferPaneToSession { .. }) => {
                 tracing::debug!("stub phase 1: TransferPaneToSession");
@@ -1168,6 +1204,15 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                 return;
                             }
 
+                            if route
+                                .window
+                                .screen
+                                .handle_titlebar_menu_click(&mut self.router.clipboard)
+                            {
+                                route.request_redraw();
+                                return;
+                            }
+
                             let handled_by_island =
                                 route.window.screen.handle_island_click(
                                     &route.window.winit_window,
@@ -1214,10 +1259,14 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                             return;
                                         }
                                         TitlebarHitResult::Menu => {
-                                            // TODO(phase 14): open titlebar popover menu
-                                            tracing::debug!(
-                                                "pane titlebar menu clicked — TODO phase 14"
-                                            );
+                                            let lx = route.window.screen.mouse.x as f32
+                                                / scale;
+                                            let ly = route.window.screen.mouse.y as f32
+                                                / scale;
+                                            route
+                                                .window
+                                                .screen
+                                                .open_pane_titlebar_menu(lx, ly);
                                         }
                                         TitlebarHitResult::SyncToggle => {
                                             route.window.screen.context_manager
@@ -1274,6 +1323,24 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             if handled_by_island {
                                 route.request_redraw();
                                 return;
+                            }
+
+                            // Right-click anywhere in a titlebar also opens the menu
+                            {
+                                let scale =
+                                    route.window.screen.sugarloaf.scale_factor();
+                                let mx =
+                                    route.window.screen.mouse.x as f32 / scale;
+                                let my =
+                                    route.window.screen.mouse.y as f32 / scale;
+                                if route.window.screen.pane_titlebar.hit_test(mx, my).is_some() {
+                                    route
+                                        .window
+                                        .screen
+                                        .open_pane_titlebar_menu(mx, my);
+                                    route.request_redraw();
+                                    return;
+                                }
                             }
                         } else if let MouseButton::Middle = button {
                             // Phase 15 (US-6.5): middle-click on a pane titlebar closes
@@ -1656,6 +1723,28 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     {
                         route.request_redraw();
                     }
+                    route.window.winit_window.set_cursor(CursorIcon::Default);
+                    return;
+                }
+
+                // Handle pane titlebar menu hover
+                if route
+                    .window
+                    .screen
+                    .renderer
+                    .pane_titlebar_menu
+                    .is_enabled()
+                {
+                    let scale = route.window.screen.sugarloaf.scale_factor();
+                    let mx = x as f32 / scale;
+                    let my = y as f32 / scale;
+                    route
+                        .window
+                        .screen
+                        .renderer
+                        .pane_titlebar_menu
+                        .hover(mx, my);
+                    route.request_redraw();
                     route.window.winit_window.set_cursor(CursorIcon::Default);
                     return;
                 }

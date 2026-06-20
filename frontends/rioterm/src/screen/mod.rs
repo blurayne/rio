@@ -1614,7 +1614,9 @@ impl Screen<'_> {
                         self.mark_dirty();
                     }
                     Act::DetachPaneToWindow => {
-                        /* TODO(phase 11): tear current pane off into a new window */
+                        // Phase 11: keyboard-driven pane tear-off (US-5.5).
+                        // Emit the event; application.rs handler creates the new window.
+                        self.context_manager.request_detach_current_pane_to_window();
                     }
 
                     _ => (),
@@ -2759,6 +2761,64 @@ impl Screen<'_> {
 
     pub fn handle_scrollbar_release(&mut self) {
         self.renderer.scrollbar.end_drag();
+    }
+
+    /// Open the pane titlebar popover menu at the given logical-pixel position.
+    pub fn open_pane_titlebar_menu(&mut self, x: f32, y: f32) {
+        let read_only = self.context_manager.current().read_only;
+        self.renderer.pane_titlebar_menu.open(x, y, read_only);
+        self.mark_dirty();
+    }
+
+    /// Handle a left-click when the titlebar menu is open.
+    ///
+    /// Returns `true` if the event was consumed (menu was open).
+    #[allow(dead_code)]
+    pub fn handle_titlebar_menu_click(&mut self, clipboard: &mut Clipboard) -> bool {
+        use crate::renderer::pane_titlebar_menu::MenuAction;
+        if !self.renderer.pane_titlebar_menu.is_enabled() {
+            return false;
+        }
+
+        let scale_factor = self.sugarloaf.scale_factor();
+        let mouse_x = self.mouse.x as f32 / scale_factor;
+        let mouse_y = self.mouse.y as f32 / scale_factor;
+
+        match self.renderer.pane_titlebar_menu.hit_test(mouse_x, mouse_y) {
+            Some(MenuAction::SearchForward) => {
+                self.renderer.pane_titlebar_menu.close();
+                self.start_search(rio_backend::crosswords::pos::Direction::Right);
+                self.resize_top_or_bottom_line(self.ctx().len());
+                self.mark_dirty();
+            }
+            Some(MenuAction::ToggleReadOnly) => {
+                self.renderer.pane_titlebar_menu.close();
+                let ctx = self.context_manager.current_mut();
+                ctx.read_only = !ctx.read_only;
+                self.mark_dirty();
+            }
+            Some(MenuAction::DetachPaneToWindow) => {
+                // TODO(phase 11): tear current pane off into a new window
+                self.renderer.pane_titlebar_menu.close();
+                self.mark_dirty();
+            }
+            Some(MenuAction::CloseCurrentSplitOrTab) => {
+                self.renderer.pane_titlebar_menu.close();
+                self.close_split_or_tab(clipboard);
+            }
+            Some(MenuAction::Dismiss) => {
+                self.renderer.pane_titlebar_menu.close();
+                self.mark_dirty();
+            }
+            // All stub submenu entries — close with no action
+            Some(_) => {
+                self.renderer.pane_titlebar_menu.close();
+                self.mark_dirty();
+            }
+            // Clicked inside menu on separator / empty area — keep open
+            None => {}
+        }
+        true
     }
 
     pub fn is_hovering_scrollbar(&self) -> bool {

@@ -2217,6 +2217,36 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             right: Box::new(self.build_session_node(children[1])),
         }
     }
+
+    // ── Phase 11: tear-off pane to new window (US-5.5) ──
+
+    /// Return the current pane's NodeId as a raw u64 (PaneNodeId).
+    /// Used by the `DetachPaneToWindow` event to cross-thread/event boundaries.
+    #[inline]
+    pub fn current_node_id_as_u64(&self) -> u64 {
+        u64::from(self.current)
+    }
+
+    /// Create a new ContextGrid that contains exactly one pre-existing Context
+    /// (no PTY spawn). Used by tear-off to wrap an extracted pane for placement
+    /// in a brand-new window's ContextManager.
+    #[allow(dead_code)]
+    pub fn from_existing_context(
+        context: Context<T>,
+        scaled_margin: Margin,
+        border_color: [f32; 4],
+        border_active_color: [f32; 4],
+        panel_config: rio_backend::config::layout::Panel,
+    ) -> Self {
+        // Delegate to `new` which already handles the single-pane case.
+        Self::new(
+            context,
+            scaled_margin,
+            border_color,
+            border_active_color,
+            panel_config,
+        )
+    }
 }
 
 #[derive(Copy, Clone, Debug)]

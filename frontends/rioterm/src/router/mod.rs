@@ -161,6 +161,17 @@ impl Route<'_> {
             }
         }
 
+        // Dismiss pane titlebar menu on Escape key
+        if self.window.screen.renderer.pane_titlebar_menu.is_enabled() {
+            if key_event.state == ElementState::Pressed {
+                if let Key::Named(NamedKey::Escape) = &key_event.logical_key {
+                    self.window.screen.renderer.pane_titlebar_menu.close();
+                    self.request_overlay_redraw();
+                }
+            }
+            return true; // Block all input while menu is open
+        }
+
         // Handle command palette input first (works in all routes)
         if self.window.screen.renderer.command_palette.is_enabled() {
             if key_event.state == ElementState::Pressed {
