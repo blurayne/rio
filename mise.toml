@@ -14,16 +14,31 @@ description = "Drop into an interactive shell inside the build container"
 run = "docker compose run --rm build bash"
 
 [tasks.build]
-description = "Release build (wayland, inside container)"
-run = "docker compose run --rm build cargo build --release -p rioterm --no-default-features --features=wayland"
+description = "Release build (wayland + x11, inside container) — copies binary to project root"
+run = """
+docker compose run --rm build sh -c "
+  cargo build --release -p rioterm --no-default-features --features=wayland,x11 &&
+  cp /workspace/target/release/rio /workspace/rio
+"
+"""
 
 [tasks.build-wayland]
-description = "Release build — Wayland feature (inside container)"
-run = "docker compose run --rm build cargo build --release -p rioterm --no-default-features --features=wayland"
+description = "Release build — Wayland feature (inside container) — copies binary to project root"
+run = """
+docker compose run --rm build sh -c "
+  cargo build --release -p rioterm --no-default-features --features=wayland &&
+  cp /workspace/target/release/rio /workspace/rio
+"
+"""
 
 [tasks.build-x11]
-description = "Release build — X11 feature (inside container)"
-run = "docker compose run --rm build cargo build --release -p rioterm --no-default-features --features=x11"
+description = "Release build — X11 feature (inside container) — copies binary to project root"
+run = """
+docker compose run --rm build sh -c "
+  cargo build --release -p rioterm --no-default-features --features=x11 &&
+  cp /workspace/target/release/rio /workspace/rio
+"
+"""
 
 [tasks.build-all-features]
 description = "Debug build with all features (inside container)"
