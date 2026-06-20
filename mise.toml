@@ -14,16 +14,16 @@ description = "Drop into an interactive shell inside the build container"
 run = "docker compose run --rm build bash"
 
 [tasks.build]
-description = "Release build (wayland + x11, inside container) — copies binary to project root"
+description = "Release build (default features: wayland + x11, inside container) — copies binary to project root"
 run = """
 docker compose run --rm build sh -c "
-  cargo build --release -p rioterm --no-default-features --features=wayland,x11 &&
+  cargo build --release -p rioterm &&
   cp /workspace/target/release/rio /workspace/rio
 "
 """
 
 [tasks.build-wayland]
-description = "Release build — Wayland feature (inside container) — copies binary to project root"
+description = "Release build — Wayland only (inside container) — copies binary to project root"
 run = """
 docker compose run --rm build sh -c "
   cargo build --release -p rioterm --no-default-features --features=wayland &&
@@ -32,13 +32,17 @@ docker compose run --rm build sh -c "
 """
 
 [tasks.build-x11]
-description = "Release build — X11 feature (inside container) — copies binary to project root"
+description = "Release build — X11 only (inside container) — copies binary to project root"
 run = """
 docker compose run --rm build sh -c "
   cargo build --release -p rioterm --no-default-features --features=x11 &&
   cp /workspace/target/release/rio /workspace/rio
 "
 """
+
+[tasks.build-debug]
+description = "Debug build (default features: wayland + x11) on host — binary at target/debug/rio"
+run = "cargo build -p rioterm"
 
 [tasks.build-all-features]
 description = "Debug build with all features (inside container)"
@@ -72,7 +76,7 @@ description = "Pre-fetch all crate dependencies into the cargo volume"
 run = "docker compose run --rm build cargo fetch"
 
 [tasks.release-debian-wayland]
-description = "Build Debian .deb package (Wayland) inside container"
+description = "Build Debian .deb package (Wayland only) inside container"
 run = """
 docker compose run --rm build sh -c "
   cargo install cargo-deb &&
@@ -81,11 +85,20 @@ docker compose run --rm build sh -c "
 """
 
 [tasks.release-debian-x11]
-description = "Build Debian .deb package (X11) inside container"
+description = "Build Debian .deb package (X11 only) inside container"
 run = """
 docker compose run --rm build sh -c "
   cargo install cargo-deb &&
   cargo deb -p rioterm -- --no-default-features --features=x11
+"
+"""
+
+[tasks.release-debian]
+description = "Build Debian .deb package (default features: wayland + x11) inside container"
+run = """
+docker compose run --rm build sh -c "
+  cargo install cargo-deb &&
+  cargo deb -p rioterm
 "
 """
 
