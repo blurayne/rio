@@ -3,8 +3,11 @@ pub mod command_palette;
 pub mod custom_cursor;
 pub mod helpers;
 pub mod island;
+pub mod pane_dnd;
+pub mod pane_titlebar;
 pub mod scrollbar;
 pub mod search;
+pub mod sidebar;
 pub mod trail_cursor;
 pub mod utils;
 
@@ -53,6 +56,7 @@ pub struct Renderer {
     pub navigation: Navigation,
     pub margin: rio_backend::config::layout::Margin,
     pub island: Option<island::Island>,
+    pub sidebar: sidebar::Sidebar,
     pub command_palette: command_palette::CommandPalette,
     unfocused_split_opacity: f32,
     unfocused_split_fill: Option<ColorArray>,
@@ -141,6 +145,7 @@ impl Renderer {
             navigation: config.navigation.clone(),
             margin: config.margin,
             island,
+            sidebar: sidebar::Sidebar::new(),
             command_palette: {
                 let mut palette = command_palette::CommandPalette::new();
                 palette.has_adaptive_theme = config.adaptive_colors.is_some();
@@ -579,6 +584,32 @@ impl Renderer {
                 (window_size.width, window_size.height, scale_factor),
                 context_manager,
                 island_bg,
+            );
+        }
+
+        // Sidebar: rendered when NavigationMode::Sidebar is active
+        if matches!(
+            self.navigation.mode,
+            rio_backend::config::navigation::NavigationMode::Sidebar
+        ) {
+            let window_height_logical = window_size.height / scale_factor;
+            let num_sessions = context_manager.len();
+            let current = context_manager.current_index();
+            let session_titles: Vec<(usize, String, bool)> = (0..num_sessions)
+                .map(|i| {
+                    let title = context_manager
+                        .custom_title(i)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("Session {}", i + 1));
+                    let is_active = i == current;
+                    (i, title, is_active)
+                })
+                .collect();
+            self.sidebar.render(
+                sugarloaf,
+                window_height_logical,
+                &session_titles,
+                &sidebar::SidebarColors::default(),
             );
         }
 

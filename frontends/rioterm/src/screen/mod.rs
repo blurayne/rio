@@ -30,6 +30,7 @@ use crate::mouse::{calculate_mouse_position, Mouse};
 use crate::renderer::{utils::padding_top_from_config, Renderer};
 use crate::screen::hint::HintMatches;
 use crate::selection::{Selection, SelectionType};
+use crate::session_layout::{get_session_layout_open_path, get_session_layout_save_path};
 use core::fmt::Debug;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use rio_backend::clipboard::Clipboard;
@@ -79,6 +80,8 @@ pub struct Screen<'screen> {
     pub allow_manual_dragging: bool,
     pub grids: rustc_hash::FxHashMap<usize, rio_backend::sugarloaf::grid::GridRenderer>,
     pub grid_rasterizer: crate::grid_emit::GridGlyphRasterizer,
+    pub pane_titlebar: crate::renderer::pane_titlebar::PaneTitlebar,
+    pub pane_drag: Option<crate::renderer::pane_dnd::PaneDragState>,
 }
 
 pub struct ScreenWindowProperties {
@@ -207,8 +210,9 @@ impl Screen<'_> {
             split_color: config.colors.split,
             split_active_color: config.colors.split_active,
             panel: config.panel,
+            pane: config.pane,
             title: config.title.clone(),
-            keyboard: config.keyboard,
+            keyboard: config.keyboard.clone(),
             scrollback_history_limit: config.scrollback_history_limit,
         };
 
@@ -297,6 +301,8 @@ impl Screen<'_> {
             allow_manual_dragging: config.navigation.is_enabled(),
             grids: rustc_hash::FxHashMap::default(),
             grid_rasterizer: crate::grid_emit::GridGlyphRasterizer::new(),
+            pane_titlebar: crate::renderer::pane_titlebar::PaneTitlebar::new(),
+            pane_drag: None,
         })
     }
 
@@ -467,8 +473,17 @@ impl Screen<'_> {
         self.mouse
             .set_multiplier_and_divider(config.scroll.multiplier, config.scroll.divider);
 
+        // Phase 8: hot-reload titlebar_enabled on all grids and update
+        // the pane config stored in the context manager so new grids
+        // created after the reload also get the correct setting.
+        self.context_manager.config.pane = config.pane;
+        let titlebar_enabled = config.pane.titlebar;
+        for context_grid in self.context_manager.contexts_mut() {
+            context_grid.set_titlebar_enabled(titlebar_enabled);
+        }
+
         // Update keyboard config in context manager
-        self.context_manager.config.keyboard = config.keyboard;
+        self.context_manager.config.keyboard = config.keyboard.clone();
 
         // Re-evaluate the opaque flag — toggling `window.opacity` /
         // `window.blur` at runtime should flip the compositor mode.
@@ -666,7 +681,10 @@ impl Screen<'_> {
                 _ => build_key_sequence(key, mods, mode),
             };
 
-            self.ctx_mut().current_mut().messenger.send_write(bytes);
+            // Phase 13: block writes when read-only
+            if !self.context_manager.current().read_only {
+                self.ctx_mut().current_mut().messenger.send_write(bytes);
+            }
 
             return;
         }
@@ -764,7 +782,35 @@ impl Screen<'_> {
             self.scroll_bottom_when_cursor_not_visible();
             self.clear_selection();
 
-            self.ctx_mut().current_mut().messenger.send_write(bytes);
+            // Phase 13: block writes when read-only
+            if !self.context_manager.current().read_only {
+                self.ctx_mut().current_mut().messenger.send_write(bytes.clone());
+
+                // Phase 12: broadcast to synced panes
+                if self.context_manager.current_grid().sync_input {
+                    let current_id = self.context_manager.current_grid().current;
+                    let targets: Vec<taffy::NodeId> = self
+                        .context_manager
+                        .current_grid()
+                        .contexts()
+                        .iter()
+                        .filter(|(&id, item)| {
+                            id != current_id && !item.val.sync_input_excluded
+                        })
+                        .map(|(&id, _)| id)
+                        .collect();
+                    for id in targets {
+                        if let Some(item) = self
+                            .context_manager
+                            .current_grid_mut()
+                            .contexts_mut()
+                            .get_mut(&id)
+                        {
+                            let _ = item.val.messenger.send_write(bytes.clone());
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1065,10 +1111,16 @@ impl Screen<'_> {
                         self.mark_dirty();
                     }
                     Act::SplitRight => {
-                        self.split_right();
+                        // Phase 6: disallow splitting while a pane is maximized
+                        if self.context_manager.current_grid().maximized.is_none() {
+                            self.split_right();
+                        }
                     }
                     Act::SplitDown => {
-                        self.split_down();
+                        // Phase 6: disallow splitting while a pane is maximized
+                        if self.context_manager.current_grid().maximized.is_none() {
+                            self.split_down();
+                        }
                     }
                     Act::MoveDividerUp => {
                         // User wants divider to move up visually, which means expanding the bottom split
@@ -1091,6 +1143,9 @@ impl Screen<'_> {
                         self.context_manager.create_new_window();
                     }
                     Act::CloseCurrentSplitOrTab => {
+                        // Phase 6 (US-7.3): restore layout before closing a maximized pane
+                        // so the remaining panes are properly displayed.
+                        // The actual style cleanup is done inside remove_current.
                         self.close_split_or_tab(clipboard);
                     }
                     Act::TabCreateNew => {
@@ -1255,12 +1310,34 @@ impl Screen<'_> {
                     }
                     Act::SelectNextSplit => {
                         self.cancel_search(clipboard);
+                        // Phase 6: if maximized, styles changed — recompute Taffy layout.
+                        let was_maximized = self
+                            .context_manager
+                            .current_grid()
+                            .maximized
+                            .is_some();
                         self.context_manager.select_next_split();
+                        if was_maximized {
+                            self.context_manager
+                                .current_grid_mut()
+                                .apply_taffy_layout_pub(&mut self.sugarloaf);
+                        }
                         self.mark_dirty();
                     }
                     Act::SelectPrevSplit => {
                         self.cancel_search(clipboard);
+                        // Phase 6: if maximized, styles changed — recompute Taffy layout.
+                        let was_maximized = self
+                            .context_manager
+                            .current_grid()
+                            .maximized
+                            .is_some();
                         self.context_manager.select_prev_split();
+                        if was_maximized {
+                            self.context_manager
+                                .current_grid_mut()
+                                .apply_taffy_layout_pub(&mut self.sugarloaf);
+                        }
                         self.mark_dirty();
                     }
                     Act::SelectNextSplitOrTab => {
@@ -1376,6 +1453,170 @@ impl Screen<'_> {
                         self.mark_dirty();
                     }
                     Act::ReceiveChar | Act::None => (),
+
+                    // ── Tiling stubs (Phase 1) — wired in later phases ──
+                    Act::SplitAuto => {
+                        // Phase 6: disallow splitting while a pane is maximized
+                        if self.context_manager.current_grid().maximized.is_none() {
+                            self.split_auto();
+                        }
+                    }
+                    Act::FocusPaneByNumber(n) => {
+                        let changed = self
+                            .context_manager
+                            .current_grid_mut()
+                            .focus_pane_by_number(*n);
+                        if changed {
+                            // Phase 6: recompute layout when swapping maximized pane.
+                            if self
+                                .context_manager
+                                .current_grid()
+                                .maximized
+                                .is_some()
+                            {
+                                self.context_manager
+                                    .current_grid_mut()
+                                    .apply_taffy_layout_pub(&mut self.sugarloaf);
+                            }
+                            self.mark_dirty();
+                        }
+                    }
+                    Act::FocusPaneByDirection(dir) => {
+                        self.cancel_search(clipboard);
+                        let changed = self
+                            .context_manager
+                            .current_grid_mut()
+                            .focus_neighbour_in_direction(*dir);
+                        if changed {
+                            // Phase 6: recompute layout when swapping maximized pane.
+                            if self
+                                .context_manager
+                                .current_grid()
+                                .maximized
+                                .is_some()
+                            {
+                                self.context_manager
+                                    .current_grid_mut()
+                                    .apply_taffy_layout_pub(&mut self.sugarloaf);
+                            }
+                            self.mark_dirty();
+                        }
+                    }
+                    Act::ResizePaneInDirection(dir) => {
+                        if self
+                            .context_manager
+                            .resize_pane_in_direction(*dir, &mut self.sugarloaf)
+                        {
+                            self.mark_dirty();
+                        }
+                    }
+                    Act::TogglePaneMaximized => {
+                        self.context_manager
+                            .current_grid_mut()
+                            .toggle_maximize(&mut self.sugarloaf);
+                        self.mark_dirty();
+                    }
+                    Act::DistributePanesEvenly => {
+                        self.context_manager
+                            .current_grid_mut()
+                            .distribute_evenly_all(&mut self.sugarloaf);
+                        self.mark_dirty();
+                    }
+                    Act::ToggleSyncInputSession => {
+                        let grid = self.context_manager.current_grid_mut();
+                        grid.sync_input = !grid.sync_input;
+                        if !grid.sync_input {
+                            // US-9.3: clear per-pane overrides when disabling
+                            for item in grid.contexts_mut().values_mut() {
+                                item.val.sync_input_excluded = false;
+                            }
+                        }
+                        self.mark_dirty();
+                    }
+                    Act::TogglePaneSyncInputOverride => {
+                        let ctx = self.context_manager.current_mut();
+                        ctx.sync_input_excluded = !ctx.sync_input_excluded;
+                        self.mark_dirty();
+                    }
+                    Act::TogglePaneReadOnly => {
+                        let ctx = self.context_manager.current_mut();
+                        ctx.read_only = !ctx.read_only;
+                        self.mark_dirty();
+                    }
+                    Act::SaveSessionLayout => {
+                        let title = self
+                            .context_manager
+                            .current_grid()
+                            .custom_title
+                            .clone();
+                        let layout = self
+                            .context_manager
+                            .current_grid()
+                            .to_session_layout(title);
+                        match serde_json::to_string_pretty(&layout) {
+                            Ok(json) => {
+                                let path = get_session_layout_save_path();
+                                if let Some(parent) = path.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                match std::fs::write(&path, &json) {
+                                    Ok(()) => tracing::info!(
+                                        "Session layout saved to {}",
+                                        path.display()
+                                    ),
+                                    Err(e) => tracing::error!(
+                                        "Failed to save session layout: {e}"
+                                    ),
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to serialize session layout: {e}"
+                                )
+                            }
+                        }
+                    }
+                    Act::OpenSessionLayout => {
+                        let path = get_session_layout_open_path();
+                        match std::fs::read_to_string(&path) {
+                            Ok(json) => {
+                                match serde_json::from_str::<
+                                    crate::session_layout::SessionLayoutFile,
+                                >(&json)
+                                {
+                                    Ok(layout) => {
+                                        if layout.version
+                                            != crate::session_layout::SessionLayoutFile::CURRENT_VERSION
+                                        {
+                                            tracing::warn!(
+                                                "Session layout version mismatch: {}",
+                                                layout.version
+                                            );
+                                        }
+                                        tracing::info!(
+                                            "Session layout loaded from {} \
+                                             (PTY restore not yet implemented — Phase 16b)",
+                                            path.display()
+                                        );
+                                    }
+                                    Err(e) => tracing::error!(
+                                        "Failed to parse session layout: {e}"
+                                    ),
+                                }
+                            }
+                            Err(e) => tracing::error!(
+                                "Failed to read session layout: {e}"
+                            ),
+                        }
+                    }
+                    Act::ToggleSessionSidebar => {
+                        self.renderer.sidebar.toggle();
+                        self.mark_dirty();
+                    }
+                    Act::DetachPaneToWindow => {
+                        /* TODO(phase 11): tear current pane off into a new window */
+                    }
+
                     _ => (),
                 }
             }
@@ -1413,6 +1654,14 @@ impl Screen<'_> {
         let rich_text_id = next_rich_text_id();
         self.context_manager
             .split(rich_text_id, true, &mut self.sugarloaf);
+
+        self.mark_dirty();
+    }
+
+    pub fn split_auto(&mut self) {
+        let rich_text_id = next_rich_text_id();
+        self.context_manager
+            .split_auto(rich_text_id, &mut self.sugarloaf);
 
         self.mark_dirty();
     }
@@ -3586,6 +3835,48 @@ impl Screen<'_> {
             }
         }
 
+        // Phase 9: pane drag overlay — highlight the drop quadrant
+        if let Some(ref drag) = self.pane_drag {
+            use crate::renderer::pane_dnd::{quadrant_at, PaneDropQuadrant};
+            let scale = self.sugarloaf.scale_factor();
+            let grid = self.context_manager.current_grid();
+            let margin = grid.get_scaled_margin();
+            // find_context_at_position subtracts margin internally; pass raw cursor
+            let cursor_phys = drag.cursor;
+
+            if let Some(target_node) =
+                grid.find_context_at_position(cursor_phys.0, cursor_phys.1)
+            {
+                if target_node != drag.source_node {
+                    if let Some(item) = grid.contexts().get(&target_node) {
+                        // layout_rect is margin-relative; add margin for physical coords
+                        let [px, py, pw, ph] = item.layout_rect;
+                        let phys_x = px + margin.left;
+                        let phys_y = py + margin.top;
+                        // quadrant_at needs the actual rect in the same coord space as cursor
+                        let quadrant = quadrant_at([phys_x, phys_y, pw, ph], cursor_phys);
+                        let lx = phys_x / scale;
+                        let ly = phys_y / scale;
+                        let lw = pw / scale;
+                        let lh = ph / scale;
+                        let thickness = 4.0_f32;
+                        let color = [0.3_f32, 0.6, 1.0, 0.7];
+                        let (hx, hy, hw, hh) = match quadrant {
+                            PaneDropQuadrant::Top => (lx, ly, lw, thickness),
+                            PaneDropQuadrant::Bottom => {
+                                (lx, ly + lh - thickness, lw, thickness)
+                            }
+                            PaneDropQuadrant::Left => (lx, ly, thickness, lh),
+                            PaneDropQuadrant::Right => {
+                                (lx + lw - thickness, ly, thickness, lh)
+                            }
+                        };
+                        self.sugarloaf.rect(None, hx, hy, hw, hh, color, 0.0, 2);
+                    }
+                }
+            }
+        }
+
         // Phase 2.2/2.3: per-panel CellBg + CellText emission with
         // per-row dirty gating. Iterates every panel in the active
         // grid. For each:
@@ -4085,6 +4376,53 @@ impl Screen<'_> {
                 };
 
                 frame_grids.push((grid, uniforms));
+            }
+
+            // Phase 8: render per-pane titlebars above pane content when
+            // `pane.titlebar` is enabled and the session has more than one pane.
+            {
+                let grid = self.context_manager.current_grid();
+                let titlebar_enabled = grid.titlebar_enabled;
+                let panel_count = grid.panel_count();
+                if titlebar_enabled && panel_count > 1 {
+                    let active_node = grid.current;
+                    let maximized_node = grid.maximized;
+                    let scale = self.sugarloaf.scale_factor();
+
+                    let panes: Vec<crate::renderer::pane_titlebar::PaneTitlebarEntry> = grid
+                        .contexts()
+                        .iter()
+                        .map(|(node_id, item)| {
+                            let is_active = *node_id == active_node;
+                            let is_maximized =
+                                maximized_node == Some(*node_id);
+                            let title = {
+                                let ctx = &item.val;
+                                let term = ctx.terminal.lock();
+                                let t = term.title.clone();
+                                drop(term);
+                                if !t.is_empty() {
+                                    t
+                                } else {
+                                    "~".to_string()
+                                }
+                            };
+                            (*node_id, item.layout_rect, title, is_active, is_maximized, false, scale)
+                        })
+                        .collect();
+
+                    let colors =
+                        crate::renderer::pane_titlebar::TitlebarColors::default();
+                    self.pane_titlebar.render(
+                        &mut self.sugarloaf,
+                        &panes,
+                        &colors,
+                    );
+                } else {
+                    // Clear hit maps when titlebar is not rendered so old
+                    // positions don't linger from a previous config.
+                    self.pane_titlebar.hitmaps.clear();
+                }
             }
 
             if should_present {

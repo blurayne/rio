@@ -59,6 +59,10 @@ pub struct Context<T: EventListener> {
     pub dimension: ContextDimension,
     pub title: ContextTitle,
     pub ime: Ime,
+    /// Phase 12: when true, this pane is excluded from sync-input broadcast.
+    pub sync_input_excluded: bool,
+    /// Phase 13: when true, PTY writes from keyboard are blocked.
+    pub read_only: bool,
     _io_thread: Option<JoinHandle<(Machine<teletypewriter::Pty, T>, performer::State)>>,
 }
 
@@ -131,6 +135,8 @@ pub struct ContextManagerConfig {
     pub split_color: [f32; 4],
     pub split_active_color: [f32; 4],
     pub panel: rio_backend::config::layout::Panel,
+    /// Phase 8: per-pane titlebar opt-in (from `config.pane.titlebar`).
+    pub pane: rio_backend::config::layout::Pane,
     pub title: rio_backend::config::title::Title,
     pub keyboard: rio_backend::config::keyboard::Keyboard,
     pub scrollback_history_limit: usize,
@@ -182,6 +188,8 @@ pub fn create_dead_context<T: rio_backend::event::EventListener>(
         dimension,
         title: ContextTitle::default(),
         ime: Ime::new(),
+        sync_input_excluded: false,
+        read_only: false,
         _io_thread: None,
     }
 }
@@ -336,6 +344,8 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             dimension,
             title: ContextTitle::default(),
             ime: Ime::new(),
+            sync_input_excluded: false,
+            read_only: false,
             _io_thread: io_thread,
         })
     }
@@ -400,16 +410,20 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             }
         }
 
+        let titlebar_enabled = ctx_config.pane.titlebar;
+        let mut initial_grid = ContextGrid::new(
+            initial_context,
+            scaled_margin,
+            ctx_config.split_color,
+            ctx_config.split_active_color,
+            ctx_config.panel,
+        );
+        initial_grid.set_titlebar_enabled(titlebar_enabled);
+
         Ok(ContextManager {
             current_index: 0,
             current_route: 0,
-            contexts: smallvec![ContextGrid::new(
-                initial_context,
-                scaled_margin,
-                ctx_config.split_color,
-                ctx_config.split_active_color,
-                ctx_config.panel,
-            )],
+            contexts: smallvec![initial_grid],
             capacity: DEFAULT_CONTEXT_CAPACITY,
             event_proxy,
             window_id,
@@ -635,6 +649,15 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
     #[inline]
     pub fn move_divider_right(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
         self.contexts[self.current_index].move_divider_right(amount, sugarloaf)
+    }
+
+    #[inline]
+    pub fn resize_pane_in_direction(
+        &mut self,
+        dir: crate::bindings::PaneDirection,
+        sugarloaf: &mut Sugarloaf,
+    ) -> bool {
+        self.contexts[self.current_index].resize_in_direction(dir, sugarloaf)
     }
 
     #[inline]
@@ -1026,6 +1049,58 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         }
     }
 
+    pub fn split_auto(
+        &mut self,
+        rich_text_id: usize,
+        sugarloaf: &mut Sugarloaf,
+    ) {
+        let mut working_dir = self.config.working_dir.clone();
+        if self.config.cwd {
+            #[cfg(not(target_os = "windows"))]
+            {
+                let current_context = self.current();
+                if let Ok(path) = teletypewriter::foreground_process_path(
+                    *current_context.main_fd,
+                    current_context.shell_pid,
+                ) {
+                    working_dir = Some(path.to_string_lossy().to_string());
+                }
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                working_dir = None;
+            }
+        }
+
+        let mut cloned_config = self.config.clone();
+        if working_dir.is_some() {
+            cloned_config.working_dir = working_dir;
+        }
+
+        let current = self.current();
+        let cursor = current.cursor_from_ref();
+
+        match ContextManager::create_context(
+            (&cursor, current.renderable_content.has_blinking_enabled),
+            self.event_proxy.clone(),
+            self.window_id,
+            rich_text_id,
+            self.current().dimension,
+            &cloned_config,
+        ) {
+            Ok(new_context) => {
+                let new_route_id = new_context.route_id;
+                self.contexts[self.current_index]
+                    .split_auto(new_context, sugarloaf);
+                self.current_route = new_route_id;
+            }
+            Err(..) => {
+                tracing::error!("not able to create a new context");
+            }
+        }
+    }
+
     pub fn split_from_config(
         &mut self,
         rich_text_id: usize,
@@ -1054,6 +1129,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             split_color: config.colors.split,
             split_active_color: config.colors.split_active,
             panel: config.panel,
+            pane: config.pane,
             title: config.title,
             keyboard: config.keyboard,
             scrollback_history_limit: config.scrollback_history_limit,
@@ -1146,13 +1222,16 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
                 Ok(new_context) => {
                     let previous_scaled_margin =
                         self.contexts[self.current_index].scaled_margin;
-                    self.contexts.push(ContextGrid::new(
+                    let titlebar_enabled = self.config.pane.titlebar;
+                    let mut new_grid = ContextGrid::new(
                         new_context,
                         previous_scaled_margin,
                         self.config.split_color,
                         self.config.split_active_color,
                         self.config.panel,
-                    ));
+                    );
+                    new_grid.set_titlebar_enabled(titlebar_enabled);
+                    self.contexts.push(new_grid);
                     if redirect {
                         self.current_index = last_index;
                         self.current_route = self.current().route_id;
@@ -1573,5 +1652,74 @@ pub mod test {
         context_manager.move_current_tab_to(5);
         assert_eq!(context_manager.current_index, 2);
         assert_eq!(order(&mut context_manager), vec![1, 0, 2, 3, 4]);
+    }
+
+    // Phase 12 + 13 tests
+
+    #[test]
+    fn sync_input_defaults_to_false() {
+        let window_id: WindowId = WindowId::from(0);
+        let context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+        assert!(!context_manager.current_grid().sync_input);
+    }
+
+    #[test]
+    fn sync_input_excluded_defaults_to_false() {
+        let window_id: WindowId = WindowId::from(0);
+        let context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+        assert!(!context_manager.current().sync_input_excluded);
+    }
+
+    #[test]
+    fn read_only_defaults_to_false() {
+        let window_id: WindowId = WindowId::from(0);
+        let context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+        assert!(!context_manager.current().read_only);
+    }
+
+    #[test]
+    fn toggle_sync_input_enables_flag() {
+        let window_id: WindowId = WindowId::from(0);
+        let mut context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+        assert!(!context_manager.current_grid().sync_input);
+        context_manager.current_grid_mut().sync_input = true;
+        assert!(context_manager.current_grid().sync_input);
+        context_manager.current_grid_mut().sync_input = false;
+        assert!(!context_manager.current_grid().sync_input);
+    }
+
+    #[test]
+    fn toggle_sync_input_clears_per_pane_overrides() {
+        let window_id: WindowId = WindowId::from(0);
+        let mut context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+        context_manager.current_grid_mut().sync_input = true;
+        context_manager.current_mut().sync_input_excluded = true;
+        assert!(context_manager.current().sync_input_excluded);
+        {
+            let grid = context_manager.current_grid_mut();
+            grid.sync_input = false;
+            for item in grid.contexts_mut().values_mut() {
+                item.val.sync_input_excluded = false;
+            }
+        }
+        assert!(!context_manager.current_grid().sync_input);
+        assert!(!context_manager.current().sync_input_excluded);
+    }
+
+    #[test]
+    fn toggle_pane_read_only() {
+        let window_id: WindowId = WindowId::from(0);
+        let mut context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+        assert!(!context_manager.current().read_only);
+        context_manager.current_mut().read_only = true;
+        assert!(context_manager.current().read_only);
+        context_manager.current_mut().read_only = false;
+        assert!(!context_manager.current().read_only);
     }
 }

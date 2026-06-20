@@ -903,6 +903,14 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     }
                 }
             }
+            // ── Tiling stubs (Phase 1) — full handlers wired in later phases ──
+            RioEventType::Rio(RioEvent::DetachPaneToWindow { .. }) => {
+                tracing::debug!("stub phase 1: DetachPaneToWindow");
+            }
+            RioEventType::Rio(RioEvent::TransferPaneToSession { .. }) => {
+                tracing::debug!("stub phase 1: TransferPaneToSession");
+            }
+
             _ => {}
         }
     }
@@ -1062,6 +1070,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
 
                         if let MouseButton::Left = button {
                             // Check if clicking on a panel border to start resize
+                            // or to double-click distribute evenly.
                             {
                                 let mx = route.window.screen.mouse.x as f32;
                                 let my = route.window.screen.mouse.y as f32;
@@ -1069,25 +1078,70 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                     route.window.screen.context_manager.current_grid();
                                 if let Some(border) = grid.find_border_at_position(mx, my)
                                 {
-                                    let start_pos = match border.direction {
-                                        crate::layout::BorderDirection::Vertical => mx,
-                                        crate::layout::BorderDirection::Horizontal => my,
-                                    };
-                                    let size_a = grid.get_panel_size(
-                                        border.left_or_top,
-                                        border.direction,
-                                    );
-                                    let size_b = grid.get_panel_size(
-                                        border.right_or_bottom,
-                                        border.direction,
-                                    );
-                                    route.window.screen.resize_state =
-                                        Some(crate::layout::ResizeState {
-                                            border,
-                                            start_pos,
-                                            original_sizes: (size_a, size_b),
-                                        });
-                                    return;
+                                    // Double-click detection: check if within 400 ms
+                                    // and within 4 px of the previous border click.
+                                    let now = Instant::now();
+                                    let is_double_click = route
+                                        .window
+                                        .screen
+                                        .mouse
+                                        .last_border_click
+                                        .map(|(px, py, pt)| {
+                                            now.duration_since(pt)
+                                                < Duration::from_millis(400)
+                                                && (mx - px).abs() < 4.0
+                                                && (my - py).abs() < 4.0
+                                        })
+                                        .unwrap_or(false);
+
+                                    if is_double_click {
+                                        // Double-click on splitter: distribute evenly
+                                        // along the axis of the clicked border.
+                                        route.window.screen.mouse.last_border_click =
+                                            None;
+                                        let axis = border.direction;
+                                        route
+                                            .window
+                                            .screen
+                                            .context_manager
+                                            .current_grid_mut()
+                                            .distribute_evenly_along(
+                                                axis,
+                                                &mut route.window.screen.sugarloaf,
+                                            );
+                                        route.window.screen.mark_dirty();
+                                        route.request_redraw();
+                                        return;
+                                    } else {
+                                        // Single click: record for future double-click
+                                        // detection and start drag-resize.
+                                        route.window.screen.mouse.last_border_click =
+                                            Some((mx, my, now));
+                                        let start_pos = match border.direction {
+                                            crate::layout::BorderDirection::Vertical => mx,
+                                            crate::layout::BorderDirection::Horizontal => {
+                                                my
+                                            }
+                                        };
+                                        let size_a = grid.get_panel_size(
+                                            border.left_or_top,
+                                            border.direction,
+                                        );
+                                        let size_b = grid.get_panel_size(
+                                            border.right_or_bottom,
+                                            border.direction,
+                                        );
+                                        route.window.screen.resize_state =
+                                            Some(crate::layout::ResizeState {
+                                                border,
+                                                start_pos,
+                                                original_sizes: (size_a, size_b),
+                                            });
+                                        return;
+                                    }
+                                } else {
+                                    // Click not on a border: clear border-click state.
+                                    route.window.screen.mouse.last_border_click = None;
                                 }
                             }
 
@@ -1124,6 +1178,71 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             if handled_by_island {
                                 route.request_redraw();
                                 return;
+                            }
+
+                            // Phase 8: per-pane titlebar hit-test.
+                            {
+                                use crate::renderer::pane_titlebar::TitlebarHitResult;
+                                let scale = route.window.screen.sugarloaf.scale_factor();
+                                let mx = route.window.screen.mouse.x as f32 / scale;
+                                let my = route.window.screen.mouse.y as f32 / scale;
+                                if let Some((_node_id, hit)) =
+                                    route.window.screen.pane_titlebar.hit_test(mx, my)
+                                {
+                                    match hit {
+                                        TitlebarHitResult::Close => {
+                                            route
+                                                .window
+                                                .screen
+                                                .close_split_or_tab(
+                                                    &mut self.router.clipboard,
+                                                );
+                                            route.request_redraw();
+                                            return;
+                                        }
+                                        TitlebarHitResult::Maximize => {
+                                            route
+                                                .window
+                                                .screen
+                                                .context_manager
+                                                .current_grid_mut()
+                                                .toggle_maximize(
+                                                    &mut route.window.screen.sugarloaf,
+                                                );
+                                            route.window.screen.mark_dirty();
+                                            route.request_redraw();
+                                            return;
+                                        }
+                                        TitlebarHitResult::Menu => {
+                                            // TODO(phase 14): open titlebar popover menu
+                                            tracing::debug!(
+                                                "pane titlebar menu clicked — TODO phase 14"
+                                            );
+                                        }
+                                        TitlebarHitResult::SyncToggle => {
+                                            route.window.screen.context_manager
+                                                .current_mut()
+                                                .sync_input_excluded ^= true;
+                                            route.window.screen.mark_dirty();
+                                            route.request_redraw();
+                                            return;
+                                        }
+                                        TitlebarHitResult::DragHandle => {
+                                            use crate::renderer::pane_dnd::PaneDragState;
+                                            // Store physical pixels — find_context_at_position expects them
+                                            let cx = route.window.screen.mouse.x as f32;
+                                            let cy = route.window.screen.mouse.y as f32;
+                                            route.window.screen.pane_drag = Some(PaneDragState {
+                                                source_node: _node_id,
+                                                cursor: (cx, cy),
+                                            });
+                                            route.request_redraw();
+                                            return;
+                                        }
+                                    }
+                                    route.request_redraw();
+                                    return;
+                                }
                             }
 
                             #[cfg(target_os = "macos")]
@@ -1250,6 +1369,70 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             return;
                         }
 
+                        // Phase 9: handle pane drag drop
+                        if button == MouseButton::Left {
+                            if let Some(drag) = route.window.screen.pane_drag.take() {
+                                use crate::renderer::pane_dnd::quadrant_at;
+                                // Physical pixels — matches find_context_at_position expectations
+                                let cx = route.window.screen.mouse.x as f32;
+                                let cy = route.window.screen.mouse.y as f32;
+                                let target = route
+                                    .window
+                                    .screen
+                                    .context_manager
+                                    .current_grid()
+                                    .find_context_at_position(cx, cy);
+                                if let Some(target_node) = target {
+                                    if target_node != drag.source_node
+                                        && route
+                                            .window
+                                            .screen
+                                            .context_manager
+                                            .current_grid()
+                                            .maximized
+                                            .is_none()
+                                    {
+                                        let target_rect = route
+                                            .window
+                                            .screen
+                                            .context_manager
+                                            .current_grid()
+                                            .contexts()
+                                            .get(&target_node)
+                                            .map(|item| item.layout_rect)
+                                            .unwrap_or([0.0; 4]);
+                                        let margin = route
+                                            .window
+                                            .screen
+                                            .context_manager
+                                            .current_grid()
+                                            .get_scaled_margin();
+                                        let phys_rect = [
+                                            target_rect[0] + margin.left,
+                                            target_rect[1] + margin.top,
+                                            target_rect[2],
+                                            target_rect[3],
+                                        ];
+                                        let quadrant = quadrant_at(phys_rect, (cx, cy));
+                                        route
+                                            .window
+                                            .screen
+                                            .context_manager
+                                            .current_grid_mut()
+                                            .move_pane(
+                                                drag.source_node,
+                                                target_node,
+                                                quadrant,
+                                                &mut route.window.screen.sugarloaf,
+                                            );
+                                        route.window.screen.mark_dirty();
+                                        route.request_redraw();
+                                    }
+                                }
+                                return;
+                            }
+                        }
+
                         if !route.window.screen.modifiers.state().shift_key()
                             && route.window.screen.mouse_mode()
                         {
@@ -1311,6 +1494,14 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 if route.path != RoutePath::Terminal {
                     route.window.winit_window.set_cursor(CursorIcon::Default);
                     return;
+                }
+
+                // Phase 9: update pane drag cursor position (physical pixels)
+                if route.window.screen.pane_drag.is_some() {
+                    if let Some(drag) = route.window.screen.pane_drag.as_mut() {
+                        drag.cursor = (x as f32, y as f32);
+                    }
+                    route.request_redraw();
                 }
 
                 // Handle assistant overlay hover

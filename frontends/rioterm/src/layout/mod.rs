@@ -114,6 +114,15 @@ pub struct ContextGrid<T: EventListener> {
     pub custom_title: Option<String>,
     // custom_color is the tab's background override (tab color picker).
     pub custom_color: Option<[f32; 4]>,
+    /// Phase 6: When `Some(node_id)`, that pane fills the session area and all
+    /// others are hidden via `display: None`. Cleared on restore or pane close.
+    pub maximized: Option<NodeId>,
+    /// Phase 8: When true and panel_count() > 1, each pane reserves top
+    /// padding for the per-pane titlebar.
+    pub titlebar_enabled: bool,
+    /// Phase 12: when true, keystrokes sent to the focused pane are also
+    /// broadcast to every other pane that has not opted out.
+    pub sync_input: bool,
     scale: f32,
     inner: FxHashMap<NodeId, ContextGridItem<T>>,
     pub root: Option<NodeId>,
@@ -229,6 +238,9 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             scaled_margin,
             custom_title: None,
             custom_color: None,
+            maximized: None,
+            titlebar_enabled: false,
+            sync_input: false,
             scale,
             width,
             height,
@@ -240,6 +252,15 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         };
         grid.calculate_positions();
         grid
+    }
+
+    /// Phase 8: Set whether the per-pane titlebar is enabled for this grid.
+    /// When enabled and panel_count() > 1, `create_panel_style` reserves top
+    /// padding for the titlebar height.
+    pub fn set_titlebar_enabled(&mut self, enabled: bool) {
+        if self.titlebar_enabled != enabled {
+            self.titlebar_enabled = enabled;
+        }
     }
 
     #[inline]
@@ -568,6 +589,15 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
     fn create_panel_style(&self) -> Style {
         let scale = self.scale;
+        // Phase 8: when titlebar is enabled and we have more than one panel,
+        // reserve extra top padding equal to the titlebar height so terminal
+        // content doesn't render under the titlebar overlay.
+        let titlebar_top_padding = if self.titlebar_enabled && self.panel_count() > 1 {
+            crate::renderer::pane_titlebar::PANE_TITLEBAR_HEIGHT * scale
+        } else {
+            0.0
+        };
+
         Style {
             display: Display::Flex,
             flex_grow: 1.0,
@@ -575,7 +605,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             padding: geometry::Rect {
                 left: length(self.panel_config.padding.left * scale),
                 right: length(self.panel_config.padding.right * scale),
-                top: length(self.panel_config.padding.top * scale),
+                top: length(self.panel_config.padding.top * scale + titlebar_top_padding),
                 bottom: length(self.panel_config.padding.bottom * scale),
             },
             margin: geometry::Rect {
@@ -700,6 +730,97 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
                 }
             }
         }
+    }
+
+    /// Phase 6: Toggle the current pane between maximized (fills the session area,
+    /// all other panes hidden) and restored (all panes share the space again).
+    ///
+    /// - If already maximized: restore all panels to flex display, clear `maximized`.
+    /// - If not maximized and there is more than one pane: hide all panels except
+    ///   the current one, record `Some(self.current)`.
+    /// - Single-pane session: no-op (US-4.4).
+    pub fn toggle_maximize(&mut self, sugarloaf: &mut Sugarloaf) {
+        if self.maximized.is_some() {
+            // Restore: bring all panel leaf nodes back to flex display, then
+            // reset sizing on all tree nodes (containers + leaves).
+            self.maximized = None;
+            // Explicitly restore display:Flex on every panel leaf node because
+            // `reset_panel_styles_to_flexible` preserves the existing `display`
+            // value (it only resets flex sizing properties).
+            let keys: Vec<NodeId> = self.inner.keys().copied().collect();
+            for id in keys {
+                let _ = self.tree.set_style(
+                    id,
+                    Style {
+                        display: Display::Flex,
+                        flex_grow: 1.0,
+                        flex_shrink: 1.0,
+                        ..Default::default()
+                    },
+                );
+            }
+            // Also reset container nodes (non-leaf nodes) to flexible sizing.
+            self.reset_panel_styles_to_flexible();
+            self.apply_taffy_layout(sugarloaf);
+        } else if self.inner.len() > 1 {
+            // Maximize: hide all panels except the current one.
+            let current = self.current;
+            self.maximized = Some(current);
+            let keys: Vec<NodeId> = self.inner.keys().copied().collect();
+            for id in keys {
+                let style = if id == current {
+                    Style {
+                        display: Display::Flex,
+                        flex_grow: 1.0,
+                        flex_shrink: 1.0,
+                        ..Default::default()
+                    }
+                } else {
+                    Style {
+                        display: Display::None,
+                        ..Default::default()
+                    }
+                };
+                let _ = self.tree.set_style(id, style);
+            }
+            self.apply_taffy_layout(sugarloaf);
+        }
+        // single pane: no-op
+    }
+
+    /// Phase 6: Update Taffy display styles when focus moves while a pane is
+    /// maximized. The previously-maximized pane is hidden and `new_current`
+    /// becomes the new maximized pane. Does **not** call `apply_taffy_layout`
+    /// so callers can batch that with other layout work.
+    ///
+    /// Returns `true` when the maximized pane was swapped (i.e. a layout
+    /// recompute is needed).
+    fn swap_maximize_display(&mut self, new_current: NodeId) -> bool {
+        if let Some(maximized_id) = self.maximized {
+            if new_current != maximized_id && self.inner.contains_key(&new_current) {
+                // Hide the previously-maximized pane.
+                let _ = self.tree.set_style(
+                    maximized_id,
+                    Style {
+                        display: Display::None,
+                        ..Default::default()
+                    },
+                );
+                // Show the newly-focused pane.
+                let _ = self.tree.set_style(
+                    new_current,
+                    Style {
+                        display: Display::Flex,
+                        flex_grow: 1.0,
+                        flex_shrink: 1.0,
+                        ..Default::default()
+                    },
+                );
+                self.maximized = Some(new_current);
+                return true;
+            }
+        }
+        false
     }
 
     /// Remove containers that have only one child by promoting the child
@@ -894,6 +1015,13 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         None
     }
 
+    /// Public wrapper around `apply_taffy_layout` for callers that need to
+    /// force a layout recompute (e.g. after maximize-swap style updates).
+    #[inline]
+    pub fn apply_taffy_layout_pub(&mut self, sugarloaf: &mut Sugarloaf) {
+        self.apply_taffy_layout(sugarloaf);
+    }
+
     fn apply_taffy_layout(&mut self, sugarloaf: &mut Sugarloaf) -> bool {
         if self.compute_layout().is_err() {
             return false;
@@ -972,11 +1100,13 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
         let keys = self.get_ordered_keys();
         if let Some(current_pos) = keys.iter().position(|&k| k == self.current) {
-            if current_pos >= keys.len() - 1 {
-                self.current = keys[0];
+            let new_current = if current_pos >= keys.len() - 1 {
+                keys[0]
             } else {
-                self.current = keys[current_pos + 1];
-            }
+                keys[current_pos + 1]
+            };
+            self.current = new_current;
+            self.swap_maximize_display(new_current);
         }
     }
 
@@ -1006,11 +1136,13 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
         let keys = self.get_ordered_keys();
         if let Some(current_pos) = keys.iter().position(|&k| k == self.current) {
-            if current_pos == 0 {
-                self.current = keys[keys.len() - 1];
+            let new_current = if current_pos == 0 {
+                keys[keys.len() - 1]
             } else {
-                self.current = keys[current_pos - 1];
-            }
+                keys[current_pos - 1]
+            };
+            self.current = new_current;
+            self.swap_maximize_display(new_current);
         }
     }
 
@@ -1026,6 +1158,104 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
                 return false;
             } else {
                 self.current = keys[current_pos - 1];
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Focus the pane at visual position `n` (1-indexed; n=10 selects index 9).
+    /// Visual order is top-to-bottom, left-to-right via `get_ordered_keys`.
+    /// Returns `true` if focus changed, `false` if already focused or out of range.
+    pub fn focus_pane_by_number(&mut self, n: u8) -> bool {
+        if self.inner.len() <= 1 {
+            return false;
+        }
+        let keys = self.get_ordered_keys();
+        let idx = (n.saturating_sub(1)) as usize;
+        if let Some(&id) = keys.get(idx) {
+            if id != self.current {
+                self.current = id;
+                self.swap_maximize_display(id);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Return the current pane's 1-based visual position (for titlebar label).
+    #[allow(dead_code)] // used by Phase 8 titlebar renderer
+    pub fn current_pane_number(&self) -> u8 {
+        let keys = self.get_ordered_keys();
+        keys.iter()
+            .position(|&k| k == self.current)
+            .map(|i| (i + 1).min(255) as u8)
+            .unwrap_or(1)
+    }
+
+    /// Find the nearest pane in the given cardinal direction from the current
+    /// pane, using each pane's `layout_rect` for geometric calculations.
+    ///
+    /// The algorithm:
+    /// 1. Computes the current pane's centre `(ccx, ccy)`.
+    /// 2. Filters other panes to those whose centre is strictly on the
+    ///    requested side *and* whose span overlaps the current pane's
+    ///    perpendicular span (so diagonally-adjacent panes that share no
+    ///    edge are excluded).
+    /// 3. Among candidates, picks the one with the smallest squared
+    ///    Euclidean distance from the current centre.
+    /// 4. Returns `Some(node_id)` or `None` when no candidate exists
+    ///    (i.e. the current pane is already at the edge in that direction).
+    pub fn find_neighbour_in_direction(
+        &self,
+        dir: crate::bindings::PaneDirection,
+    ) -> Option<NodeId> {
+        use crate::bindings::PaneDirection::*;
+        if self.inner.len() <= 1 {
+            return None;
+        }
+        let cur = self.inner.get(&self.current)?;
+        let [cx0, cy0, cw, ch] = cur.layout_rect;
+        let (ccx, ccy) = (cx0 + cw / 2.0, cy0 + ch / 2.0);
+
+        let mut best: Option<(NodeId, f32)> = None;
+        for (&id, item) in &self.inner {
+            if id == self.current {
+                continue;
+            }
+            let [ox, oy, ow, oh] = item.layout_rect;
+            let (ocx, ocy) = (ox + ow / 2.0, oy + oh / 2.0);
+
+            // A candidate is valid only when its centre is strictly on the
+            // requested side AND its span overlaps the current pane's
+            // perpendicular span.
+            let on_side = match dir {
+                Left => ocx < ccx && oy < cy0 + ch && oy + oh > cy0,
+                Right => ocx > ccx && oy < cy0 + ch && oy + oh > cy0,
+                Up => ocy < ccy && ox < cx0 + cw && ox + ow > cx0,
+                Down => ocy > ccy && ox < cx0 + cw && ox + ow > cx0,
+            };
+            if on_side {
+                let dist = (ocx - ccx).powi(2) + (ocy - ccy).powi(2);
+                if best.is_none_or(|(_, d)| dist < d) {
+                    best = Some((id, dist));
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    /// Move focus to the nearest pane in `dir`.
+    ///
+    /// Returns `true` when focus changed, `false` when already at the edge.
+    pub fn focus_neighbour_in_direction(
+        &mut self,
+        dir: crate::bindings::PaneDirection,
+    ) -> bool {
+        if let Some(id) = self.find_neighbour_in_direction(dir) {
+            if id != self.current {
+                self.current = id;
+                self.swap_maximize_display(id);
                 return true;
             }
         }
@@ -1133,6 +1363,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         if let Some(context_id) = self.find_context_at_position(x, y) {
             if context_id != self.current {
                 self.current = context_id;
+                self.swap_maximize_display(context_id);
                 return true;
             }
         }
@@ -1249,6 +1480,14 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             return;
         }
 
+        // Phase 6 (US-7.3): if the pane being closed is maximized (or any pane is
+        // maximized), restore all panel styles first so removal doesn't leave the
+        // grid in a broken display state.
+        if self.maximized.is_some() {
+            self.maximized = None;
+            self.reset_panel_styles_to_flexible();
+        }
+
         let to_remove = self.current;
 
         if !self.inner.contains_key(&to_remove) {
@@ -1317,6 +1556,116 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         }
     }
 
+    /// Extract a pane from the layout WITHOUT dropping its Context.
+    /// Returns the ContextGridItem (with live PTY). Returns None if only 1 pane.
+    pub fn take_pane(
+        &mut self,
+        node_id: NodeId,
+        sugarloaf: &mut Sugarloaf,
+    ) -> Option<ContextGridItem<T>> {
+        if self.inner.len() <= 1 {
+            return None;
+        }
+        if !self.inner.contains_key(&node_id) {
+            return None;
+        }
+
+        if self.maximized == Some(node_id) {
+            self.maximized = None;
+            self.reset_panel_styles_to_flexible();
+        }
+
+        if self.current == node_id {
+            let ordered = self.get_ordered_keys();
+            let pos = ordered.iter().position(|&k| k == node_id).unwrap_or(0);
+            self.current = if pos + 1 < ordered.len() {
+                ordered[pos + 1]
+            } else if pos > 0 {
+                ordered[pos - 1]
+            } else {
+                *self.inner.keys().find(|&&k| k != node_id)?
+            };
+        }
+
+        let _ = self.tree.remove(node_id);
+        let item = self.inner.remove(&node_id)?;
+
+        if Some(node_id) == self.root {
+            self.root = self.inner.keys().next().copied();
+        }
+
+        self.collapse_single_child_containers();
+
+        if self.panel_count() == 1 {
+            self.reset_panel_styles_to_flexible();
+        }
+        self.apply_taffy_layout(sugarloaf);
+
+        Some(item)
+    }
+
+    /// Move source pane to land on an edge of target pane.
+    /// No-op when source == target or grid is maximized.
+    pub fn move_pane(
+        &mut self,
+        source: NodeId,
+        target: NodeId,
+        quadrant: crate::renderer::pane_dnd::PaneDropQuadrant,
+        sugarloaf: &mut Sugarloaf,
+    ) {
+        use crate::renderer::pane_dnd::PaneDropQuadrant;
+
+        if source == target {
+            return;
+        }
+        if self.maximized.is_some() {
+            return;
+        }
+        if !self.inner.contains_key(&source) || !self.inner.contains_key(&target) {
+            return;
+        }
+
+        let source_item = match self.take_pane(source, sugarloaf) {
+            Some(item) => item,
+            None => return,
+        };
+
+        if !self.inner.contains_key(&target) {
+            // target collapsed away — fall back to simple split
+            self.current = *self.inner.keys().next().unwrap_or(&self.current);
+            if let Ok(new_node) = self.try_split_right() {
+                self.inner.insert(new_node, source_item);
+                self.apply_taffy_layout(sugarloaf);
+                self.current = new_node;
+            }
+            return;
+        }
+
+        self.current = target;
+        let (split_result, swap) = match quadrant {
+            PaneDropQuadrant::Right => (self.try_split_right(), false),
+            PaneDropQuadrant::Bottom => (self.try_split_down(), false),
+            PaneDropQuadrant::Left => (self.try_split_right(), true),
+            PaneDropQuadrant::Top => (self.try_split_down(), true),
+        };
+
+        let Ok(new_node) = split_result else {
+            return;
+        };
+
+        if swap {
+            let target_item = self.inner.remove(&target).unwrap();
+            self.inner.insert(new_node, target_item);
+            self.inner.insert(target, source_item);
+            self.current = target;
+        } else {
+            self.inner.insert(new_node, source_item);
+            self.current = new_node;
+        }
+
+        self.apply_taffy_layout(sugarloaf);
+    }
+
     pub fn split_right(&mut self, context: Context<T>, sugarloaf: &mut Sugarloaf) {
         if !self.inner.contains_key(&self.current) {
             return;
@@ -1344,6 +1693,93 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             self.apply_taffy_layout(sugarloaf);
             self.current = new_node;
         }
+    }
+
+    /// Split automatically based on the current pane's aspect ratio.
+    /// Wide panes (width >= height) split right; tall panes split down.
+    pub fn split_auto(&mut self, context: Context<T>, sugarloaf: &mut Sugarloaf) {
+        let rect = self
+            .inner
+            .get(&self.current)
+            .map(|i| i.layout_rect)
+            .unwrap_or([0.0; 4]);
+        let w = if rect[2] > 0.0 { rect[2] } else { self.width };
+        let h = if rect[3] > 0.0 { rect[3] } else { self.height };
+        if w >= h {
+            self.split_right(context, sugarloaf);
+        } else {
+            self.split_down(context, sugarloaf);
+        }
+    }
+
+    /// Distribute panes evenly along one axis.
+    ///
+    /// Walks every node in the Taffy tree; for each *container* node whose
+    /// `flex_direction` matches `axis`, every direct child is reset to
+    /// `flex_basis = length(0)` and `flex_grow = 1.0` so that all siblings
+    /// get equal share of the available space on that axis.
+    ///
+    /// Axis mapping (consistent with `BorderDirection` semantics):
+    ///   `BorderDirection::Vertical`   → `FlexDirection::Row`    (side-by-side panes)
+    ///   `BorderDirection::Horizontal` → `FlexDirection::Column`  (stacked panes)
+    pub fn distribute_evenly_along(
+        &mut self,
+        axis: BorderDirection,
+        sugarloaf: &mut Sugarloaf,
+    ) {
+        // Collect all nodes in the tree (both leaf panels and container nodes).
+        let mut all_nodes: Vec<NodeId> = vec![self.root_node];
+        let mut idx = 0;
+        while idx < all_nodes.len() {
+            let node = all_nodes[idx];
+            if let Ok(children) = self.tree.children(node) {
+                for child in children {
+                    all_nodes.push(child);
+                }
+            }
+            idx += 1;
+        }
+
+        // Target FlexDirection for the requested axis.
+        let target_dir = match axis {
+            BorderDirection::Vertical => taffy::FlexDirection::Row,
+            BorderDirection::Horizontal => taffy::FlexDirection::Column,
+        };
+
+        for node in all_nodes {
+            // Only process nodes with children (i.e. containers, not leaves).
+            let children = match self.tree.children(node) {
+                Ok(c) if !c.is_empty() => c,
+                _ => continue,
+            };
+
+            // Check whether this container's flex_direction matches the axis.
+            let matches = match self.tree.style(node) {
+                Ok(s) => s.flex_direction == target_dir,
+                Err(_) => continue,
+            };
+            if !matches {
+                continue;
+            }
+
+            // Set every child to equal flex size.
+            for child in children {
+                if let Ok(mut style) = self.tree.style(child).cloned() {
+                    style.flex_basis = taffy::style_helpers::length(0.0);
+                    style.flex_grow = 1.0;
+                    style.flex_shrink = 1.0;
+                    let _ = self.tree.set_style(child, style);
+                }
+            }
+        }
+
+        self.apply_taffy_layout(sugarloaf);
+    }
+
+    /// Distribute panes evenly along both axes.
+    pub fn distribute_evenly_all(&mut self, sugarloaf: &mut Sugarloaf) {
+        self.distribute_evenly_along(BorderDirection::Vertical, sugarloaf);
+        self.distribute_evenly_along(BorderDirection::Horizontal, sugarloaf);
     }
 
     pub fn move_divider_up(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
@@ -1552,6 +1988,100 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         false
     }
 
+    /// Shift the boundary adjacent to the current pane by 10 logical pixels
+    /// in `dir`, **growing** the current pane and shrinking its neighbour.
+    ///
+    /// - `Right` — current pane expands rightward (shrinks the right neighbour).
+    /// - `Left`  — current pane expands leftward (shrinks the left neighbour).
+    /// - `Down`  — current pane expands downward (shrinks the bottom neighbour).
+    /// - `Up`    — current pane expands upward (shrinks the top neighbour).
+    ///
+    /// Returns `true` when the layout was actually changed.
+    pub fn resize_in_direction(
+        &mut self,
+        dir: crate::bindings::PaneDirection,
+        sugarloaf: &mut Sugarloaf,
+    ) -> bool {
+        use crate::bindings::PaneDirection;
+
+        if self.panel_count() <= 1 {
+            return false;
+        }
+
+        // 10 logical pixels scaled to physical pixels, matching the coordinate
+        // space used by set_panel_size / move_divider_*.
+        let amount = 10.0 * self.scale;
+        let current_node = self.current;
+        let min_size = 50.0_f32;
+
+        match dir {
+            PaneDirection::Left | PaneDirection::Right => {
+                if let Some((left_node, right_node)) =
+                    self.find_horizontal_neighbors(current_node)
+                {
+                    let left_w = match self.tree.layout(left_node).ok() {
+                        Some(l) => l.size.width,
+                        None => return false,
+                    };
+                    let right_w = match self.tree.layout(right_node).ok() {
+                        Some(l) => l.size.width,
+                        None => return false,
+                    };
+
+                    // The current pane always grows; the opposite neighbour shrinks.
+                    let (new_left_w, new_right_w) = if current_node == left_node {
+                        // current is the left pane: grow left, shrink right
+                        (left_w + amount, right_w - amount)
+                    } else {
+                        // current is the right pane: grow right, shrink left
+                        (left_w - amount, right_w + amount)
+                    };
+
+                    if new_left_w < min_size || new_right_w < min_size {
+                        return false;
+                    }
+
+                    let _ = self.set_panel_size(left_node, Some(new_left_w), None);
+                    let _ = self.set_panel_size(right_node, Some(new_right_w), None);
+                    return self.apply_taffy_layout(sugarloaf);
+                }
+            }
+            PaneDirection::Up | PaneDirection::Down => {
+                if let Some((top_node, bottom_node)) =
+                    self.find_vertical_neighbors(current_node)
+                {
+                    let top_h = match self.tree.layout(top_node).ok() {
+                        Some(l) => l.size.height,
+                        None => return false,
+                    };
+                    let bottom_h = match self.tree.layout(bottom_node).ok() {
+                        Some(l) => l.size.height,
+                        None => return false,
+                    };
+
+                    // The current pane always grows; the opposite neighbour shrinks.
+                    let (new_top_h, new_bottom_h) = if current_node == top_node {
+                        // current is the top pane: grow top, shrink bottom
+                        (top_h + amount, bottom_h - amount)
+                    } else {
+                        // current is the bottom pane: grow bottom, shrink top
+                        (top_h - amount, bottom_h + amount)
+                    };
+
+                    if new_top_h < min_size || new_bottom_h < min_size {
+                        return false;
+                    }
+
+                    let _ = self.set_panel_size(top_node, None, Some(new_top_h));
+                    let _ = self.set_panel_size(bottom_node, None, Some(new_bottom_h));
+                    return self.apply_taffy_layout(sugarloaf);
+                }
+            }
+        }
+
+        false
+    }
+
     /// Hide the panel set by clearing per-panel image overlays. The
     /// `visible=true` case is a no-op — the next `Renderer::run` will
     /// repopulate overlays naturally for whichever tab/group is
@@ -1575,6 +2105,99 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     pub fn remove_all_rich_text(&self, sugarloaf: &mut Sugarloaf) {
         for item in self.inner.values() {
             sugarloaf.clear_image_overlays_for(item.val.rich_text_id);
+        }
+    }
+
+    /// Serialize the current pane tree into a [`SessionLayoutFile`] for
+    /// JSON save/restore.
+    pub fn to_session_layout(
+        &self,
+        title: Option<String>,
+    ) -> crate::session_layout::SessionLayoutFile {
+        let tree = self.build_session_node(self.root_node);
+        crate::session_layout::SessionLayoutFile::new(tree, title)
+    }
+
+    fn build_session_node(
+        &self,
+        node: NodeId,
+    ) -> crate::session_layout::SessionNode {
+        use crate::session_layout::{SessionNode, SplitDir};
+
+        // Leaf pane: exists in the inner map
+        if let Some(item) = self.inner.get(&node) {
+            let cwd = {
+                let terminal = item.val.terminal.lock();
+                terminal
+                    .current_directory
+                    .as_ref()
+                    .and_then(|p| p.clone().into_os_string().into_string().ok())
+            };
+            return SessionNode::Pane {
+                working_dir: cwd,
+                profile: None,
+            };
+        }
+
+        // Container node — recurse into children
+        let children = match self.tree.children(node) {
+            Ok(c) => c,
+            Err(_) => {
+                return SessionNode::Pane {
+                    working_dir: None,
+                    profile: None,
+                }
+            }
+        };
+
+        if children.len() < 2 {
+            // Degenerate: single-child container or empty — return a placeholder
+            if let Some(&only) = children.first() {
+                return self.build_session_node(only);
+            }
+            return SessionNode::Pane {
+                working_dir: None,
+                profile: None,
+            };
+        }
+
+        let dir = match self.tree.style(node) {
+            Ok(style) => {
+                if matches!(
+                    style.flex_direction,
+                    taffy::FlexDirection::Row | taffy::FlexDirection::RowReverse
+                ) {
+                    SplitDir::Horizontal
+                } else {
+                    SplitDir::Vertical
+                }
+            }
+            Err(_) => SplitDir::Horizontal,
+        };
+
+        // Compute ratio from the first child's layout size vs. total
+        let ratio = match self.tree.layout(children[0]) {
+            Ok(layout) => {
+                let total = if dir == SplitDir::Horizontal {
+                    self.width.max(1.0)
+                } else {
+                    self.height.max(1.0)
+                };
+                let part = if dir == SplitDir::Horizontal {
+                    layout.size.width
+                } else {
+                    layout.size.height
+                };
+                (part / total).clamp(0.0, 1.0)
+            }
+            Err(_) => 0.5,
+        };
+
+        SessionNode::Split {
+            direction: dir,
+            ratio,
+            left: Box::new(self.build_session_node(children[0])),
+            right: Box::new(self.build_session_node(children[1])),
         }
     }
 }
