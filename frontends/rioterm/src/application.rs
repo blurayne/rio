@@ -1325,7 +1325,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                 return;
                             }
 
-                            // Right-click anywhere in a titlebar also opens the menu
+                            // Right-click anywhere opens the pane menu
                             {
                                 let scale =
                                     route.window.screen.sugarloaf.scale_factor();
@@ -1333,14 +1333,12 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                     route.window.screen.mouse.x as f32 / scale;
                                 let my =
                                     route.window.screen.mouse.y as f32 / scale;
-                                if route.window.screen.pane_titlebar.hit_test(mx, my).is_some() {
-                                    route
-                                        .window
-                                        .screen
-                                        .open_pane_titlebar_menu(mx, my);
-                                    route.request_redraw();
-                                    return;
-                                }
+                                route
+                                    .window
+                                    .screen
+                                    .open_pane_titlebar_menu(mx, my);
+                                route.request_redraw();
+                                return;
                             }
                         } else if let MouseButton::Middle = button {
                             // Phase 15 (US-6.5): middle-click on a pane titlebar closes
