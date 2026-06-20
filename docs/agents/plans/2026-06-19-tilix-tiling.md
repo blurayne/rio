@@ -4,7 +4,7 @@ git_commit: e1946a7b98a5a5a4074f384437f0256abf1df75b
 branch: main
 topic: "Tilix-style tiling for Rio terminal"
 tags: [plan, tiling, panes, sessions, drag-and-drop, sugarloaf, layout, bindings]
-status: draft
+status: complete
 ---
 
 # Tilix-style Tiling Implementation Plan

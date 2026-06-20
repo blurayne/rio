@@ -185,7 +185,19 @@ impl Screen<'_> {
 
         let mut renderer = Renderer::new(config);
 
-        let bindings = crate::bindings::default_key_bindings(config);
+        let bindings = if config.keyboard.preset == "tilix" {
+            let mut kb =
+                crate::bindings::tilix_preset::tilix_key_bindings();
+            // Append user overrides on top of the Tilix preset so that
+            // explicit `[bindings]` entries always take precedence.
+            kb = crate::bindings::config_key_bindings(
+                config.bindings.keys.to_owned(),
+                kb,
+            );
+            kb
+        } else {
+            crate::bindings::default_key_bindings(config)
+        };
 
         let is_native = config.navigation.is_native();
 

@@ -3,6 +3,7 @@
 // which is licensed under Apache 2.0 license.
 
 pub mod kitty_keyboard;
+pub mod tilix_preset;
 
 /// Cardinal direction for pane navigation, resize, and related tiling actions.
 /// Named `PaneDirection` to avoid collision with `rio_backend::crosswords::pos::Direction`
