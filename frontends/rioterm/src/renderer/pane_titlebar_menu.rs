@@ -44,6 +44,8 @@ fn color_u8(c: [f32; 4]) -> [u8; 4] {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum MenuAction {
+    SplitRight,
+    SplitDown,
     SearchForward,
     ToggleReadOnly,
     DetachPaneToWindow,
@@ -140,6 +142,9 @@ impl PaneTitlebarMenu {
             "Read-Only ☐"
         };
         vec![
+            MenuEntry::item("Split Vertically", MenuAction::SplitRight),
+            MenuEntry::item("Split Horizontally", MenuAction::SplitDown),
+            MenuEntry::separator(),
             MenuEntry::item("Find…", MenuAction::SearchForward),
             MenuEntry::item(read_only_label, MenuAction::ToggleReadOnly),
             MenuEntry::separator(),

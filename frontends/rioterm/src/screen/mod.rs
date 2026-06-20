@@ -2797,6 +2797,16 @@ impl Screen<'_> {
         let mouse_y = self.mouse.y as f32 / scale_factor;
 
         match self.renderer.pane_titlebar_menu.hit_test(mouse_x, mouse_y) {
+            Some(MenuAction::SplitRight) => {
+                self.renderer.pane_titlebar_menu.close();
+                self.split_right();
+                self.mark_dirty();
+            }
+            Some(MenuAction::SplitDown) => {
+                self.renderer.pane_titlebar_menu.close();
+                self.split_down();
+                self.mark_dirty();
+            }
             Some(MenuAction::SearchForward) => {
                 self.renderer.pane_titlebar_menu.close();
                 self.start_search(rio_backend::crosswords::pos::Direction::Right);
