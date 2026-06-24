@@ -89,6 +89,10 @@ pub enum RioEvent {
     PrepareRender(u64),
     PrepareRenderOnRoute(u64, usize),
     PrepareUpdateConfig,
+    /// A native context-menu item was selected.
+    /// The `u32` is an opaque action id resolved via the frontend's
+    /// per-router registry; rio-backend stays UI-agnostic.
+    NativeContextMenuAction(u32),
     /// New terminal content available.
     Render,
     /// New terminal content available per route.
@@ -240,7 +244,6 @@ pub enum RioEvent {
     Noop,
 
     // ── Tiling events (Phase 1 stubs; handlers wired in later phases) ──
-
     /// Tear a pane off into a brand-new top-level window. US-5.5.
     ///
     /// `source_node` is the raw `taffy::NodeId` bits cast to `PaneNodeId`.
@@ -374,6 +377,9 @@ impl Debug for RioEvent {
             }
             RioEvent::ColorChange(route_id, color, rgb) => {
                 write!(f, "ColorChange({route_id}, {color:?}, {rgb:?})")
+            }
+            RioEvent::NativeContextMenuAction(id) => {
+                write!(f, "NativeContextMenuAction({id})")
             }
         }
     }

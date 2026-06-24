@@ -48,6 +48,13 @@ Full recursive pane splitting backed by [Taffy](https://github.com/DioxusLabs/ta
 
 45 keybindings matching the Tilix terminal defaults, enabled with a single config line.
 
+### Native Context Menu on Mouse Right-Click (Phase 19)
+
+- **Linux X11**: mouse right-click spawns a borderless override-redirect popup window (rio-window) hosting the menu via Sugarloaf. Menu can extend past the parent window's edge. Dismiss on click-outside, focus-loss, or `Escape`.
+- **Linux Wayland**: keeps the in-canvas Sugarloaf popover (no `xdg_popup` support in rio-window yet — tracked for a follow-up).
+- **macOS / Windows**: still on the in-canvas Sugarloaf popover; native `NSMenu` / `HMENU` via the `muda` crate is wired structurally and tracked in `docs/agents/plans/2026-06-24-native-context-menu-macos-windows.md`.
+- The keyboard-triggered popover (current and any future Shift+F10 / Menu-key path) always stays on the in-canvas Sugarloaf renderer.
+
 ---
 
 ## New Configuration Keys

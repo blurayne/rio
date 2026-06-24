@@ -99,6 +99,82 @@ impl Application<'_> {
         )
     }
 
+    /// Dispatch a `WindowEvent` for a borderless context-menu popup
+    /// window. Self-contained lifecycle — closes on selection, focus
+    /// loss, Escape, or explicit `CloseRequested`.
+    #[cfg(target_os = "linux")]
+    fn handle_popup_menu_event(
+        &mut self,
+        window_id: rio_window::window::WindowId,
+        event: WindowEvent,
+    ) {
+        use rio_window::event::{ElementState, MouseButton};
+        use rio_window::keyboard::{Key, NamedKey};
+
+        let mut dispatch_id: Option<u32> = None;
+        let mut should_close = false;
+        let mut needs_redraw = false;
+
+        if let Some(popup) = self.router.popup_menus.get_mut(&window_id) {
+            match event {
+                WindowEvent::RedrawRequested => {
+                    popup.render();
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let scale = popup.sugarloaf.scale_factor();
+                    popup.on_cursor_moved(
+                        position.x as f32 / scale,
+                        position.y as f32 / scale,
+                    );
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    let (x, y) = popup.cursor_logical;
+                    dispatch_id =
+                        popup.handle_click(x, y, &self.router.menu_action_registry);
+                    should_close = popup.should_close;
+                    needs_redraw = true;
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if event.state == ElementState::Pressed
+                        && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                    {
+                        popup.mark_for_close();
+                        should_close = true;
+                    }
+                }
+                WindowEvent::Focused(false) | WindowEvent::CloseRequested => {
+                    popup.mark_for_close();
+                    should_close = true;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(id) = dispatch_id {
+            // Send the menu-action event so it routes through the
+            // standard dispatcher (Router.pending_menu_origin already
+            // points at the originating window).
+            self.event_proxy.send_event(
+                RioEventType::Rio(RioEvent::NativeContextMenuAction(id)),
+                window_id,
+            );
+        }
+
+        if should_close {
+            self.router.popup_menus.remove(&window_id);
+            // The popup window is dropped here, tearing down its
+            // Sugarloaf surface and the underlying X11/Wayland window.
+        }
+
+        if needs_redraw {
+            // No-op when the popup was just removed.
+        }
+    }
+
     fn handle_audio_bell(&mut self) {
         #[cfg(target_os = "macos")]
         {
@@ -212,6 +288,23 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: EventPayload) {
         let window_id = event.window_id;
         match event.payload {
+            RioEventType::Rio(RioEvent::NativeContextMenuAction(id)) => {
+                let Some(action) = self.router.menu_action_registry.remove(&id) else {
+                    return;
+                };
+                let Some(origin) = self.router.pending_menu_origin.take() else {
+                    return;
+                };
+                #[cfg(target_os = "linux")]
+                self.router.popup_menus.remove(&origin);
+                if let Some(route) = self.router.routes.get_mut(&origin) {
+                    route
+                        .window
+                        .screen
+                        .dispatch_menu_action(action, &mut self.router.clipboard);
+                    route.request_redraw();
+                }
+            }
             RioEventType::Rio(RioEvent::Render) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
                     // Skip rendering for unfocused windows if configured
@@ -912,23 +1005,22 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }) => {
                 // Extract the pane from the source route, then create a new window.
                 // Two separate borrows are needed: one for extraction, one for creation.
-                let extracted = if let Some(route) =
-                    self.router.routes.get_mut(&source_window)
-                {
-                    route.window.screen.context_manager.set_current(source_tab);
-                    let result = route
-                        .window
-                        .screen
-                        .context_manager
-                        .detach_current_pane(&mut route.window.screen.sugarloaf);
-                    if result.is_some() {
-                        route.window.screen.mark_dirty();
-                        route.request_redraw();
-                    }
-                    result
-                } else {
-                    None
-                };
+                let extracted =
+                    if let Some(route) = self.router.routes.get_mut(&source_window) {
+                        route.window.screen.context_manager.set_current(source_tab);
+                        let result = route
+                            .window
+                            .screen
+                            .context_manager
+                            .detach_current_pane(&mut route.window.screen.sugarloaf);
+                        if result.is_some() {
+                            route.window.screen.mark_dirty();
+                            route.request_redraw();
+                        }
+                        result
+                    } else {
+                        None
+                    };
 
                 if extracted.is_some() {
                     // TODO: preserve running PTY across window tear-off.
@@ -1003,6 +1095,16 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     ) {
         // Ignore all events we do not care about.
         if Self::skip_window_event(&event) {
+            return;
+        }
+
+        // Linux: dispatch events targeting a borderless context-menu
+        // popup window before falling through to normal terminal route
+        // handling. The popup lifecycle is self-contained (open on
+        // right-click → close on selection / focus-loss / Escape).
+        #[cfg(target_os = "linux")]
+        if self.router.popup_menus.contains_key(&window_id) {
+            self.handle_popup_menu_event(window_id, event);
             return;
         }
 
@@ -1236,12 +1338,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                 {
                                     match hit {
                                         TitlebarHitResult::Close => {
-                                            route
-                                                .window
-                                                .screen
-                                                .close_split_or_tab(
-                                                    &mut self.router.clipboard,
-                                                );
+                                            route.window.screen.close_split_or_tab(
+                                                &mut self.router.clipboard,
+                                            );
                                             route.request_redraw();
                                             return;
                                         }
@@ -1269,7 +1368,10 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                                 .open_pane_titlebar_menu(lx, ly);
                                         }
                                         TitlebarHitResult::SyncToggle => {
-                                            route.window.screen.context_manager
+                                            route
+                                                .window
+                                                .screen
+                                                .context_manager
                                                 .current_mut()
                                                 .sync_input_excluded ^= true;
                                             route.window.screen.mark_dirty();
@@ -1281,10 +1383,11 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                             // Store physical pixels — find_context_at_position expects them
                                             let cx = route.window.screen.mouse.x as f32;
                                             let cy = route.window.screen.mouse.y as f32;
-                                            route.window.screen.pane_drag = Some(PaneDragState {
-                                                source_node: _node_id,
-                                                cursor: (cx, cy),
-                                            });
+                                            route.window.screen.pane_drag =
+                                                Some(PaneDragState {
+                                                    source_node: _node_id,
+                                                    cursor: (cx, cy),
+                                                });
                                             route.request_redraw();
                                             return;
                                         }
@@ -1325,19 +1428,35 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                 return;
                             }
 
-                            // Right-click anywhere opens the pane menu
+                            // Right-click anywhere opens the pane menu.
+                            // Try the native OS context menu first; fall
+                            // back to the in-canvas Sugarloaf popover
+                            // when the native path is unavailable
+                            // (Wayland today, macOS/Windows until the
+                            // muda follow-up ships).
                             {
-                                let scale =
-                                    route.window.screen.sugarloaf.scale_factor();
-                                let mx =
-                                    route.window.screen.mouse.x as f32 / scale;
-                                let my =
-                                    route.window.screen.mouse.y as f32 / scale;
-                                route
-                                    .window
-                                    .screen
-                                    .open_pane_titlebar_menu(mx, my);
-                                route.request_redraw();
+                                let scale = route.window.screen.sugarloaf.scale_factor();
+                                let mx = route.window.screen.mouse.x as f32 / scale;
+                                let my = route.window.screen.mouse.y as f32 / scale;
+                                // Let NLL end the &mut borrow on `route`
+                                // before calling back into `self.router`.
+                                let shown = self.router.open_native_context_menu(
+                                    event_loop,
+                                    window_id,
+                                    (mx, my),
+                                    &self.config,
+                                );
+                                if !shown {
+                                    if let Some(route) =
+                                        self.router.routes.get_mut(&window_id)
+                                    {
+                                        route
+                                            .window
+                                            .screen
+                                            .open_pane_titlebar_menu(mx, my);
+                                        route.request_redraw();
+                                    }
+                                }
                                 return;
                             }
                         } else if let MouseButton::Middle = button {
@@ -1351,12 +1470,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                 .pane
                                 .close_on_middle_click
                             {
-                                let scale =
-                                    route.window.screen.sugarloaf.scale_factor();
-                                let mx =
-                                    route.window.screen.mouse.x as f32 / scale;
-                                let my =
-                                    route.window.screen.mouse.y as f32 / scale;
+                                let scale = route.window.screen.sugarloaf.scale_factor();
+                                let mx = route.window.screen.mouse.x as f32 / scale;
+                                let my = route.window.screen.mouse.y as f32 / scale;
                                 if let Some((_node_id, _hit)) =
                                     route.window.screen.pane_titlebar.hit_test(mx, my)
                                 {
@@ -1371,9 +1487,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                     route
                                         .window
                                         .screen
-                                        .close_split_or_tab(
-                                            &mut self.router.clipboard,
-                                        );
+                                        .close_split_or_tab(&mut self.router.clipboard);
                                     route.window.screen.mark_dirty();
                                     route.request_redraw();
                                     return;
@@ -1544,23 +1658,12 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                                     let is_in_tab_strip = cy < ISLAND_HEIGHT * scale;
 
                                     if is_in_tab_strip
-                                        && route
-                                            .window
-                                            .screen
-                                            .renderer
-                                            .island
-                                            .is_some()
+                                        && route.window.screen.renderer.island.is_some()
                                     {
-                                        let window_size = route
-                                            .window
-                                            .screen
-                                            .sugarloaf
-                                            .window_size();
-                                        let num_tabs = route
-                                            .window
-                                            .screen
-                                            .context_manager
-                                            .len();
+                                        let window_size =
+                                            route.window.screen.sugarloaf.window_size();
+                                        let num_tabs =
+                                            route.window.screen.context_manager.len();
                                         let layout = tab_strip_layout(
                                             window_size.width,
                                             scale,
@@ -1726,13 +1829,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 }
 
                 // Handle pane titlebar menu hover
-                if route
-                    .window
-                    .screen
-                    .renderer
-                    .pane_titlebar_menu
-                    .is_enabled()
-                {
+                if route.window.screen.renderer.pane_titlebar_menu.is_enabled() {
                     let scale = route.window.screen.sugarloaf.scale_factor();
                     let mx = x as f32 / scale;
                     let my = y as f32 / scale;

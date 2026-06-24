@@ -195,11 +195,7 @@ impl PaneTitlebarMenu {
 
         let total_h = self.total_height();
         // Outside menu bounds → dismiss
-        if x < self.x
-            || x > self.x + MENU_WIDTH
-            || y < self.y
-            || y > self.y + total_h
-        {
+        if x < self.x || x > self.x + MENU_WIDTH || y < self.y || y > self.y + total_h {
             return Some(MenuAction::Dismiss);
         }
 
@@ -249,14 +245,7 @@ impl PaneTitlebarMenu {
 
         // Background fill
         sugarloaf.rect(
-            None,
-            self.x,
-            self.y,
-            MENU_WIDTH,
-            total_h,
-            BG_COLOR,
-            DEPTH_BG,
-            MENU_ORDER,
+            None, self.x, self.y, MENU_WIDTH, total_h, BG_COLOR, DEPTH_BG, MENU_ORDER,
         );
 
         // Border (1px right and bottom edges via an outer/inner rect trick)
@@ -428,13 +417,15 @@ mod tests {
     }
 
     #[test]
-    fn hit_test_first_item_returns_search_forward() {
+    fn hit_test_first_item_returns_split_right() {
         let mut menu = PaneTitlebarMenu::new();
         menu.open(0.0, 0.0, false);
-        // First item starts at y = PADDING_TOP, height = ENTRY_HEIGHT
+        // First item starts at y = PADDING_TOP, height = ENTRY_HEIGHT.
+        // After commit 256251e508 ("Split Vertically" was prepended)
+        // the first actionable row is `SplitRight`.
         let hit_y = PADDING_TOP + ENTRY_HEIGHT / 2.0;
         let result = menu.hit_test(PADDING_LEFT, hit_y);
-        assert_eq!(result, Some(MenuAction::SearchForward));
+        assert_eq!(result, Some(MenuAction::SplitRight));
     }
 
     #[test]
@@ -450,7 +441,11 @@ mod tests {
     #[test]
     fn separator_entries_have_no_action() {
         let menu = PaneTitlebarMenu::new();
-        let seps: Vec<_> = menu.entries().into_iter().filter(|e| e.is_separator).collect();
+        let seps: Vec<_> = menu
+            .entries()
+            .into_iter()
+            .filter(|e| e.is_separator)
+            .collect();
         assert!(!seps.is_empty());
         for sep in seps {
             assert!(sep.action.is_none());

@@ -186,14 +186,11 @@ impl Screen<'_> {
         let mut renderer = Renderer::new(config);
 
         let bindings = if config.keyboard.preset == "tilix" {
-            let mut kb =
-                crate::bindings::tilix_preset::tilix_key_bindings();
+            let mut kb = crate::bindings::tilix_preset::tilix_key_bindings();
             // Append user overrides on top of the Tilix preset so that
             // explicit `[bindings]` entries always take precedence.
-            kb = crate::bindings::config_key_bindings(
-                config.bindings.keys.to_owned(),
-                kb,
-            );
+            kb =
+                crate::bindings::config_key_bindings(config.bindings.keys.to_owned(), kb);
             kb
         } else {
             crate::bindings::default_key_bindings(config)
@@ -796,7 +793,10 @@ impl Screen<'_> {
 
             // Phase 13: block writes when read-only
             if !self.context_manager.current().read_only {
-                self.ctx_mut().current_mut().messenger.send_write(bytes.clone());
+                self.ctx_mut()
+                    .current_mut()
+                    .messenger
+                    .send_write(bytes.clone());
 
                 // Phase 12: broadcast to synced panes
                 if self.context_manager.current_grid().sync_input {
@@ -1323,11 +1323,8 @@ impl Screen<'_> {
                     Act::SelectNextSplit => {
                         self.cancel_search(clipboard);
                         // Phase 6: if maximized, styles changed — recompute Taffy layout.
-                        let was_maximized = self
-                            .context_manager
-                            .current_grid()
-                            .maximized
-                            .is_some();
+                        let was_maximized =
+                            self.context_manager.current_grid().maximized.is_some();
                         self.context_manager.select_next_split();
                         if was_maximized {
                             self.context_manager
@@ -1339,11 +1336,8 @@ impl Screen<'_> {
                     Act::SelectPrevSplit => {
                         self.cancel_search(clipboard);
                         // Phase 6: if maximized, styles changed — recompute Taffy layout.
-                        let was_maximized = self
-                            .context_manager
-                            .current_grid()
-                            .maximized
-                            .is_some();
+                        let was_maximized =
+                            self.context_manager.current_grid().maximized.is_some();
                         self.context_manager.select_prev_split();
                         if was_maximized {
                             self.context_manager
@@ -1480,12 +1474,7 @@ impl Screen<'_> {
                             .focus_pane_by_number(*n);
                         if changed {
                             // Phase 6: recompute layout when swapping maximized pane.
-                            if self
-                                .context_manager
-                                .current_grid()
-                                .maximized
-                                .is_some()
-                            {
+                            if self.context_manager.current_grid().maximized.is_some() {
                                 self.context_manager
                                     .current_grid_mut()
                                     .apply_taffy_layout_pub(&mut self.sugarloaf);
@@ -1501,12 +1490,7 @@ impl Screen<'_> {
                             .focus_neighbour_in_direction(*dir);
                         if changed {
                             // Phase 6: recompute layout when swapping maximized pane.
-                            if self
-                                .context_manager
-                                .current_grid()
-                                .maximized
-                                .is_some()
-                            {
+                            if self.context_manager.current_grid().maximized.is_some() {
                                 self.context_manager
                                     .current_grid_mut()
                                     .apply_taffy_layout_pub(&mut self.sugarloaf);
@@ -1556,15 +1540,10 @@ impl Screen<'_> {
                         self.mark_dirty();
                     }
                     Act::SaveSessionLayout => {
-                        let title = self
-                            .context_manager
-                            .current_grid()
-                            .custom_title
-                            .clone();
-                        let layout = self
-                            .context_manager
-                            .current_grid()
-                            .to_session_layout(title);
+                        let title =
+                            self.context_manager.current_grid().custom_title.clone();
+                        let layout =
+                            self.context_manager.current_grid().to_session_layout(title);
                         match serde_json::to_string_pretty(&layout) {
                             Ok(json) => {
                                 let path = get_session_layout_save_path();
@@ -1582,9 +1561,7 @@ impl Screen<'_> {
                                 }
                             }
                             Err(e) => {
-                                tracing::error!(
-                                    "Failed to serialize session layout: {e}"
-                                )
+                                tracing::error!("Failed to serialize session layout: {e}")
                             }
                         }
                     }
@@ -1616,9 +1593,9 @@ impl Screen<'_> {
                                     ),
                                 }
                             }
-                            Err(e) => tracing::error!(
-                                "Failed to read session layout: {e}"
-                            ),
+                            Err(e) => {
+                                tracing::error!("Failed to read session layout: {e}")
+                            }
                         }
                     }
                     Act::ToggleSessionSidebar => {
@@ -2787,7 +2764,6 @@ impl Screen<'_> {
     /// Returns `true` if the event was consumed (menu was open).
     #[allow(dead_code)]
     pub fn handle_titlebar_menu_click(&mut self, clipboard: &mut Clipboard) -> bool {
-        use crate::renderer::pane_titlebar_menu::MenuAction;
         if !self.renderer.pane_titlebar_menu.is_enabled() {
             return false;
         }
@@ -2796,51 +2772,63 @@ impl Screen<'_> {
         let mouse_x = self.mouse.x as f32 / scale_factor;
         let mouse_y = self.mouse.y as f32 / scale_factor;
 
-        match self.renderer.pane_titlebar_menu.hit_test(mouse_x, mouse_y) {
-            Some(MenuAction::SplitRight) => {
+        if let Some(action) = self.renderer.pane_titlebar_menu.hit_test(mouse_x, mouse_y)
+        {
+            self.dispatch_menu_action(action, clipboard);
+        }
+        true
+    }
+
+    /// Dispatch a menu action chosen from either the Sugarloaf popover
+    /// (keyboard path) or a native OS context menu (mouse right-click
+    /// path). All paths funnel here so behaviour stays consistent.
+    pub fn dispatch_menu_action(
+        &mut self,
+        action: crate::renderer::pane_titlebar_menu::MenuAction,
+        clipboard: &mut Clipboard,
+    ) {
+        use crate::renderer::pane_titlebar_menu::MenuAction;
+        match action {
+            MenuAction::SplitRight => {
                 self.renderer.pane_titlebar_menu.close();
                 self.split_right();
                 self.mark_dirty();
             }
-            Some(MenuAction::SplitDown) => {
+            MenuAction::SplitDown => {
                 self.renderer.pane_titlebar_menu.close();
                 self.split_down();
                 self.mark_dirty();
             }
-            Some(MenuAction::SearchForward) => {
+            MenuAction::SearchForward => {
                 self.renderer.pane_titlebar_menu.close();
                 self.start_search(rio_backend::crosswords::pos::Direction::Right);
                 self.resize_top_or_bottom_line(self.ctx().len());
                 self.mark_dirty();
             }
-            Some(MenuAction::ToggleReadOnly) => {
+            MenuAction::ToggleReadOnly => {
                 self.renderer.pane_titlebar_menu.close();
                 let ctx = self.context_manager.current_mut();
                 ctx.read_only = !ctx.read_only;
                 self.mark_dirty();
             }
-            Some(MenuAction::DetachPaneToWindow) => {
-                // TODO(phase 11): tear current pane off into a new window
+            MenuAction::DetachPaneToWindow => {
                 self.renderer.pane_titlebar_menu.close();
                 self.mark_dirty();
             }
-            Some(MenuAction::CloseCurrentSplitOrTab) => {
+            MenuAction::CloseCurrentSplitOrTab => {
                 self.renderer.pane_titlebar_menu.close();
                 self.close_split_or_tab(clipboard);
             }
-            Some(MenuAction::Dismiss) => {
+            MenuAction::Dismiss => {
                 self.renderer.pane_titlebar_menu.close();
                 self.mark_dirty();
             }
-            // All stub submenu entries — close with no action
-            Some(_) => {
+            // Stub submenu entries — close with no action
+            _ => {
                 self.renderer.pane_titlebar_menu.close();
                 self.mark_dirty();
             }
-            // Clicked inside menu on separator / empty area — keep open
-            None => {}
         }
-        true
     }
 
     pub fn is_hovering_scrollbar(&self) -> bool {
@@ -4471,35 +4459,39 @@ impl Screen<'_> {
                     let maximized_node = grid.maximized;
                     let scale = self.sugarloaf.scale_factor();
 
-                    let panes: Vec<crate::renderer::pane_titlebar::PaneTitlebarEntry> = grid
-                        .contexts()
-                        .iter()
-                        .map(|(node_id, item)| {
-                            let is_active = *node_id == active_node;
-                            let is_maximized =
-                                maximized_node == Some(*node_id);
-                            let title = {
-                                let ctx = &item.val;
-                                let term = ctx.terminal.lock();
-                                let t = term.title.clone();
-                                drop(term);
-                                if !t.is_empty() {
-                                    t
-                                } else {
-                                    "~".to_string()
-                                }
-                            };
-                            (*node_id, item.layout_rect, title, is_active, is_maximized, false, scale)
-                        })
-                        .collect();
+                    let panes: Vec<crate::renderer::pane_titlebar::PaneTitlebarEntry> =
+                        grid.contexts()
+                            .iter()
+                            .map(|(node_id, item)| {
+                                let is_active = *node_id == active_node;
+                                let is_maximized = maximized_node == Some(*node_id);
+                                let title = {
+                                    let ctx = &item.val;
+                                    let term = ctx.terminal.lock();
+                                    let t = term.title.clone();
+                                    drop(term);
+                                    if !t.is_empty() {
+                                        t
+                                    } else {
+                                        "~".to_string()
+                                    }
+                                };
+                                (
+                                    *node_id,
+                                    item.layout_rect,
+                                    title,
+                                    is_active,
+                                    is_maximized,
+                                    false,
+                                    scale,
+                                )
+                            })
+                            .collect();
 
                     let colors =
                         crate::renderer::pane_titlebar::TitlebarColors::default();
-                    self.pane_titlebar.render(
-                        &mut self.sugarloaf,
-                        &panes,
-                        &colors,
-                    );
+                    self.pane_titlebar
+                        .render(&mut self.sugarloaf, &panes, &colors);
                 } else {
                     // Clear hit maps when titlebar is not rendered so old
                     // positions don't linger from a previous config.

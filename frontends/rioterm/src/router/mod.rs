@@ -1,6 +1,10 @@
+pub mod native_context_menu;
+#[cfg(target_os = "linux")]
+pub mod popup_menu_window;
 pub mod routes;
 mod window;
 use crate::event::EventProxy;
+use crate::renderer::pane_titlebar_menu::MenuAction;
 use crate::router::window::{
     configure_window, create_window_builder, DEFAULT_MINIMUM_WINDOW_HEIGHT,
     DEFAULT_MINIMUM_WINDOW_WIDTH,
@@ -11,6 +15,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use rio_backend::clipboard::Clipboard;
 use rio_backend::config::Config as RioConfig;
 use rio_backend::error::{RioError, RioErrorLevel, RioErrorType};
+use std::collections::HashMap;
 
 use rio_window::dpi::{PhysicalPosition, PhysicalSize};
 use rio_window::event_loop::ActiveEventLoop;
@@ -375,6 +380,20 @@ pub struct Router<'a> {
     pub config_route: Option<WindowId>,
     pub clipboard: Clipboard,
     current_tab_id: u64,
+    /// Borderless popup windows hosting native context menus (Linux X11).
+    /// Keyed by the popup window's own WindowId — events targeting these
+    /// windows are dispatched by `Application::window_event` to the
+    /// popup-specific handler instead of the normal terminal path.
+    #[cfg(target_os = "linux")]
+    pub popup_menus: FxHashMap<WindowId, popup_menu_window::PopupMenuWindow>,
+    /// Map from opaque menu-item id to the corresponding `MenuAction`,
+    /// populated when a context menu is built and consulted when the
+    /// resulting `RioEvent::NativeContextMenuAction(id)` fires.
+    pub menu_action_registry: HashMap<u32, MenuAction>,
+    /// The window/pane the user right-clicked — set when the menu opens,
+    /// taken when the action fires so the dispatch lands on the right
+    /// route.
+    pub pending_menu_origin: Option<WindowId>,
 }
 
 impl Router<'_> {
@@ -401,6 +420,109 @@ impl Router<'_> {
             font_library: Box::new(font_library),
             clipboard,
             current_tab_id: 0,
+            #[cfg(target_os = "linux")]
+            popup_menus: FxHashMap::default(),
+            menu_action_registry: HashMap::new(),
+            pending_menu_origin: None,
+        }
+    }
+
+    /// Open the OS-native context menu for the pane the user just
+    /// right-clicked. Returns `true` if a native menu (or popup window)
+    /// was shown; `false` if the caller should fall back to the
+    /// in-canvas Sugarloaf popover.
+    pub fn open_native_context_menu(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        origin_window: WindowId,
+        cursor_logical: (f32, f32),
+        _config: &RioConfig,
+    ) -> bool {
+        use crate::renderer::pane_titlebar_menu::PaneTitlebarMenu;
+
+        let Some(route) = self.routes.get(&origin_window) else {
+            return false;
+        };
+
+        let scale = route.window.winit_window.scale_factor();
+        let read_only = route.window.screen.context_manager.current().read_only;
+
+        // Build the entry list once — used by both the registry and the
+        // platform body.
+        let mut probe = PaneTitlebarMenu::new();
+        probe.open(0.0, 0.0, read_only);
+        let entries = probe.entries();
+        native_context_menu::build_registry(&entries, &mut self.menu_action_registry);
+        self.pending_menu_origin = Some(origin_window);
+
+        #[cfg(target_os = "linux")]
+        {
+            // Compute absolute screen position = parent outer position
+            // + cursor offset (cursor coords are in logical pixels
+            // relative to the parent window's inner area).
+            //
+            // If outer_position() fails (Wayland — but we early-out
+            // below on Wayland anyway via the display-handle check, so
+            // this only matters on platforms where the API isn't
+            // implemented), fall back to the Sugarloaf in-canvas
+            // popover rather than spawning a popup at the wrong place.
+            let parent_outer = match route.window.winit_window.outer_position() {
+                Ok(pos) => pos,
+                Err(_) => {
+                    self.pending_menu_origin = None;
+                    return false;
+                }
+            };
+            let cursor_phys = (
+                parent_outer.x + (cursor_logical.0 * scale as f32) as i32,
+                parent_outer.y + (cursor_logical.1 * scale as f32) as i32,
+            );
+
+            let parent_display_handle = match route.window.winit_window.display_handle() {
+                Ok(h) => h.as_raw(),
+                Err(_) => {
+                    self.pending_menu_origin = None;
+                    return false;
+                }
+            };
+
+            match popup_menu_window::PopupMenuWindow::open(
+                _event_loop,
+                origin_window,
+                parent_display_handle,
+                cursor_phys,
+                read_only,
+                scale,
+                _config,
+                &self.font_library,
+                &mut self.menu_action_registry,
+            ) {
+                Ok(Some(popup)) => {
+                    let id = popup.winit_window.id();
+                    self.popup_menus.insert(id, popup);
+                    true
+                }
+                Ok(None) => {
+                    // Wayland — caller falls back to in-canvas popover.
+                    self.pending_menu_origin = None;
+                    false
+                }
+                Err(err) => {
+                    tracing::warn!("failed to spawn native context-menu popup: {err}");
+                    self.pending_menu_origin = None;
+                    false
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            // muda integration for macOS/Windows is tracked in a
+            // follow-up plan. For now, fall back to the in-canvas
+            // Sugarloaf popover so right-click is not broken.
+            let _ = cursor_logical;
+            self.pending_menu_origin = None;
+            false
         }
     }
 
