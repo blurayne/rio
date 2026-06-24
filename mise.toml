@@ -14,29 +14,29 @@ description = "Drop into an interactive shell inside the build container"
 run = "docker compose run --rm build bash"
 
 [tasks.build]
-description = "Release build (default features: wayland + x11, inside container) — copies binary to project root"
+description = "Release build (default features: wayland + x11, inside container) — copies binary to ./rio-linux"
 run = """
 docker compose run --rm build sh -c "
   cargo build --release -p rioterm &&
-  cp /workspace/target/release/rio /workspace/rio
+  cp /workspace/target/release/rio /workspace/rio-linux
 "
 """
 
 [tasks.build-wayland]
-description = "Release build — Wayland only (inside container) — copies binary to project root"
+description = "Release build — Wayland only (inside container) — copies binary to ./rio-linux-wayland"
 run = """
 docker compose run --rm build sh -c "
   cargo build --release -p rioterm --no-default-features --features=wayland &&
-  cp /workspace/target/release/rio /workspace/rio
+  cp /workspace/target/release/rio /workspace/rio-linux-wayland
 "
 """
 
 [tasks.build-x11]
-description = "Release build — X11 only (inside container) — copies binary to project root"
+description = "Release build — X11 only (inside container) — copies binary to ./rio-linux-x11"
 run = """
 docker compose run --rm build sh -c "
   cargo build --release -p rioterm --no-default-features --features=x11 &&
-  cp /workspace/target/release/rio /workspace/rio
+  cp /workspace/target/release/rio /workspace/rio-linux-x11
 "
 """
 
@@ -109,3 +109,15 @@ run = "docker volume rm rio_target-cache || true"
 [tasks.clean-all]
 description = "Remove ALL build volumes including crate cache"
 run = "docker volume rm rio_target-cache rio_cargo-registry rio_cargo-git || true"
+
+[tasks.clean-image-cache]
+description = "Prune BuildKit caches used by the Dockerfile RUN mounts (apt downloads, etc.). Frees disk; next `docker compose build` will repopulate."
+run = "docker builder prune --force --filter type=exec.cachemount"
+
+[tasks.clean-everything]
+description = "Nuclear option: runtime volumes + BuildKit caches + the rio-build image itself. Next build starts from scratch."
+run = """
+docker volume rm rio_target-cache rio_cargo-registry rio_cargo-git || true
+docker builder prune --force --filter type=exec.cachemount
+docker image rm rio-build:latest || true
+"""
